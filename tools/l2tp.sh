@@ -312,7 +312,7 @@ EOF
 render_xl2tpd_conf() {
     cat <<EOF
 ; /etc/xl2tpd/xl2tpd.conf -- written by l2tp.sh
-; Keywords use `keyword = value` form per xl2tpd.conf(5).
+; Keywords use keyword = value form per xl2tpd.conf(5).
 [global]
 port = 1701
 listen-addr = ${PUBLIC_IP}
@@ -333,7 +333,7 @@ refuse eap = yes
 ; Assign client IPs from this range (the pppd options file sets
 ; require-mschap-v2 and ms-dns; see $PPP_OPTIONS).
 assign ip = yes
-; `local ip` is the inside address of THIS xl2tpd instance — it becomes
+; 'local ip' is the inside address of THIS xl2tpd instance — it becomes
 ; the peer address in the PPP session and must be within the client
 ; subnet, NOT the server's public IP.
 local ip = ${LOCAL_IP}

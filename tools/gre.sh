@@ -272,8 +272,7 @@ compute_inner_pair() {
 
     # Build all candidate /30 network bases under the parent.
     local -a candidates=()
-    local base_last step
-    base_last="${net##*.}"
+    local step
     # A /30 has 4 addresses; step through in increments of 4.
     step=$(( 1 << (32 - prefix) ))
     # Iterate over all /30 block boundaries in the parent subnet.
@@ -285,9 +284,11 @@ compute_inner_pair() {
     local -A used=()
     local c
     for c in "${candidates[@]}"; do
-        # Each candidate IS the /30 network base; pair is .1 and .2.
-        used["${c}.1"]=1
-        used["${c}.2"]=1
+        # Each candidate is a /30 network base (multiple of 4).
+        # The usable inner IPs are base+1 and base+2.
+        local last="${c##*.}" prefix="${c%.*}"
+        used["${prefix}.$(( last + 1 ))"]=1
+        used["${prefix}.$(( last + 2 ))"]=1
     done
     # Mark already-assigned pairs from stored configs.
     if [[ -d "$CONF_DIR" ]]; then
@@ -314,7 +315,6 @@ compute_inner_pair() {
     done
 
     # Pick the best candidate: sort the two public IPs; lower gets .1.
-    local sorted_ips
     if [[ "$(printf '%s\n%s\n' "$LOCAL_IP" "$REMOTE_IP" | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | sed -n '1p')" == "$LOCAL_IP" ]]; then
         # LOCAL_IP is the lower endpoint -> it gets .1.
         local my_role="a"
@@ -326,9 +326,11 @@ compute_inner_pair() {
     local cand
     for cand in "${candidates[@]}"; do
         local a b
-        # Each candidate IS the /30 network base; pair is .1 and .2.
-        a="${cand}.1"
-        b="${cand}.2"
+        # Each candidate is a /30 network base (multiple of 4).
+        # The usable inner IPs are base+1 and base+2.
+        local last="${cand##*.}" prefix="${cand%.*}"
+        a="${prefix}.$(( last + 1 ))"
+        b="${prefix}.$(( last + 2 ))"
         if [[ "$my_role" == "a" ]]; then
             if [[ -z "${used[$a]:-}" ]]; then
                 LOCAL_INNER="$a"
@@ -491,7 +493,6 @@ setup_forwarding() {
     iface="$(default_iface)"
     # Apply immediately AND persist. Install iptables-persistent if absent.
     apt_get install iptables-persistent >/dev/null 2>&1 || true
-    local savefile="/etc/iptables/rules.v4"
     # Always insert the rules (they are idempotent via -C check below).
     iptables -t nat -C POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE 2>/dev/null \
         || iptables -t nat -A POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE
