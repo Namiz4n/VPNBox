@@ -329,7 +329,6 @@ ipsec saref = no
 require authentication = yes
 refuse pap = yes
 refuse chap = yes
-refuse eap = yes
 ; Assign client IPs from this range (the pppd options file sets
 ; require-mschap-v2 and ms-dns; see $PPP_OPTIONS).
 assign ip = yes

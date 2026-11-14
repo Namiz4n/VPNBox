@@ -146,7 +146,7 @@ jobs:
           sudo mkdir -p /var/run/xl2tpd
           xl2tpd_out="$(timeout 3 xl2tpd -D -c /etc/xl2tpd/xl2tpd.conf -C /var/run/xl2tpd/l2tp-control 2>&1 || true)"
           echo "${xl2tpd_out:-(no output)}"
-          if echo "${xl2tpd_out:-}" | grep -iqE 'parse_config:.*line too long or no .*=.. in data|Unable to load config file'; then
+          if echo "${xl2tpd_out:-}" | grep -iqE 'parse_config:|Unable to load config file'; then
             echo "::error::xl2tpd rejected the generated config"
             exit 1
           fi
