@@ -285,9 +285,9 @@ compute_inner_pair() {
     local -A used=()
     local c
     for c in "${candidates[@]}"; do
-        local net_base="${c%.*}"
-        used["${net_base}.1"]=1
-        used["${net_base}.2"]=1
+        # Each candidate IS the /30 network base; pair is .1 and .2.
+        used["${c}.1"]=1
+        used["${c}.2"]=1
     done
     # Mark already-assigned pairs from stored configs.
     if [[ -d "$CONF_DIR" ]]; then
@@ -326,9 +326,9 @@ compute_inner_pair() {
     local cand
     for cand in "${candidates[@]}"; do
         local a b
-        local cand_net="${cand%.*}"
-        a="${cand_net}.1"
-        b="${cand_net}.2"
+        # Each candidate IS the /30 network base; pair is .1 and .2.
+        a="${cand}.1"
+        b="${cand}.2"
         if [[ "$my_role" == "a" ]]; then
             if [[ -z "${used[$a]:-}" ]]; then
                 LOCAL_INNER="$a"
