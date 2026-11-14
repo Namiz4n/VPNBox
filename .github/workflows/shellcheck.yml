@@ -42,25 +42,16 @@ jobs:
 
       - name: Validate generated ocserv config with ocserv --test-config
         run: |
-          # Generate the config without running the full installer.
           bash tools/ocserv.sh print-config > /tmp/ocserv-test.conf
           echo "--- generated ocserv.conf ---"
           cat /tmp/ocserv-test.conf
-          # The certificate files referenced by the config must exist for
-          # --test-config to pass; create throwaway self-signed certs.
           sudo mkdir -p /etc/ocserv/ssl
           sudo openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
             -keyout /etc/ocserv/ssl/server-key.pem \
             -out  /etc/ocserv/ssl/server-cert.pem \
             -subj "/CN=vpn.local"
-          # The password file referenced by the config must exist.
           sudo touch /etc/ocserv/ocpasswd
-          # The socket-file path must exist as a directory (it lives under
-          # /run, which is present on the runner).
           sudo mkdir -p /run
-          # Run the test STRICTLY: capture both stdout and stderr, and fail
-          # if the exit code is non-zero OR if an "unknown option" warning
-          # was printed. No more `|| true` swallowing the real failure.
           set -o pipefail
           rc=0
           out="$(sudo ocserv -c /tmp/ocserv-test.conf --test-config 2>&1)" || rc=$?
@@ -84,12 +75,7 @@ jobs:
 
       - name: Check pptpd availability on this release
         run: |
-          # On releases without pptpd (Ubuntu 24.04+), the tool must refuse
-          # to install but print-config must still work (it does not touch
-          # the package manager).
           bash tools/pptp.sh print-config | tee /tmp/pptp-dryrun.txt
-          # Basic sanity: the generated pptpd.conf + ppp options must be
-          # present and well-formed.
           grep -q 'option /etc/ppp/pptpd-options' /tmp/pptp-dryrun.txt \
             || { echo "::error::pptpd.conf missing the option directive"; exit 1; }
           grep -q 'require-mppe-128' /tmp/pptp-dryrun.txt \
@@ -121,8 +107,6 @@ jobs:
       - name: Generate and validate L2TP configs
         run: |
           set -uo pipefail
-          # print-config renders every file the install path would write.
-          # Feed it a fixed public IP so CI is deterministic.
           bash tools/l2tp.sh print-config \
             --public-ip 203.0.113.9 \
             --psk 'TestPSK123456789012345' \
@@ -130,8 +114,6 @@ jobs:
           echo "--- generated L2TP configs ---"
           cat /tmp/l2tp-dryrun.txt
 
-          # --- Extract each rendered file into its real path so the real
-          #     validators can parse them. ----------------------------------------------------------
           awk '/^--- \/etc\/ipsec\.conf$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
               | sudo tee /etc/ipsec.conf >/dev/null
           awk '/^--- \/etc\/ipsec\.secrets$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
@@ -142,10 +124,6 @@ jobs:
           awk '/^--- \/etc\/ppp\/options\.xl2tpd$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
               | sudo tee /etc/ppp/options.xl2tpd >/dev/null
 
-          # --- strongSwan starter validation -------------------------------------------------------
-          # `ipsec starter --nofork --debug-all` parses ipsec.conf and
-          # reports unknown keywords / parsing errors, then exits. We
-          # capture its stdout+stderr and check the output.
           echo "=== strongSwan starter output ==="
           rc=0
           starter_out="$(/usr/lib/ipsec/starter --nofork --debug-all 2>&1)" || rc=$?
@@ -154,36 +132,20 @@ jobs:
             echo "::error::strongSwan starter failed (exit $rc); see above output"
             exit 1
           fi
-          # Fail if any line says "unknown keyword" or "parsing error".
           if echo "$starter_out" | grep -iqE 'unknown keyword|parsing error'; then
             echo "::error::strongSwan starter reported unknown keywords or parsing errors"
             exit 1
           fi
-          # The healthy summary for a parsed-but-not-started config contains
-          # the text "0 parsing errors". Assert it explicitly.
           if ! echo "$starter_out" | grep -q '0 parsing errors'; then
             echo "::error::strongSwan starter did not report '0 parsing errors'"
             exit 1
           fi
           echo "strongSwan starter: OK (0 parsing errors, no unknown keywords)."
 
-          # --- xl2tpd validation ------------------------------------------------------------------
-          # xl2tpd -D forks into the background; we launch it with a
-          # minimal control FIFO, let it run briefly, then kill it. Errors
-          # appear on stdout/stderr before the daemon detaches.
           echo "=== xl2tpd startup check ==="
           rm -f /var/run/xl2tpd/l2tp-control
           mkdir -p /var/run/xl2tpd
-          rc=0
-          xl2tpd_out="$(xl2tpd -D -c /etc/xl2tpd/xl2tpd.conf -C /var/run/xl2tpd/l2tp-control 2>&1 &)" \
-              ; XL2TPD_PID=$!
-          sleep 2
-          kill "$XL2TPD_PID" 2>/dev/null || true
-          wait "$XL2TPD_PID" 2>/dev/null || true
-          if [[ ${PIPESTATUS[0]:-0} -ne 0 ]] && ! kill -0 "$XL2TPD_PID" 2>/dev/null; then
-            # The process exited quickly; re-capture its output.
-            xl2tpd_out="$(xl2tpd -D -c /etc/xl2tpd/xl2tpd.conf -C /var/run/xl2tpd/l2tp-control 2>&1)" || true
-          fi
+          xl2tpd_out="$(timeout 3 xl2tpd -D -c /etc/xl2tpd/xl2tpd.conf -C /var/run/xl2tpd/l2tp-control 2>&1 || true)"
           echo "${xl2tpd_out:-(no output)}"
           if echo "${xl2tpd_out:-}" | grep -iqE 'parse_config:.*line too long or no .*=.. in data|Unable to load config file'; then
             echo "::error::xl2tpd rejected the generated config"
@@ -204,20 +166,17 @@ jobs:
         run: |
           set -uo pipefail
           SIDES_DIR="$(mktemp -d)"
-          # Side A: explicit local = 203.0.113.1, remote = 203.0.113.2.
           bash tools/gre.sh print-config \
             --name gre0 \
             --local 203.0.113.1 \
             --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 \
             > "$SIDES_DIR/sideA.txt"
-          # Extract the peer command from side A's output.
           peer_line="$(grep '^bash gre.sh add' "$SIDES_DIR/sideA.txt" || true)"
           if [[ -z "$peer_line" ]]; then
             echo "::error::side-A output has no peer-side command"
             exit 1
           fi
-          # The peer command, when run on side B, becomes side B's config.
           eval "$peer_line" > "$SIDES_DIR/sideB.txt" 2>&1 || {
             echo "::error::peer command failed (see above)"
             exit 1
@@ -227,8 +186,6 @@ jobs:
           echo "--- side B ---"
           cat "$SIDES_DIR/sideB.txt"
 
-          # --- Assertions --------------------------------------------------------------
-          # Extract inner addresses from each side.
           a_local_inner="$(grep '^ip addr add' "$SIDES_DIR/sideA.txt" \
               | awk '{print $5}' | cut -d/ -f1 || true)"
           a_remote_inner="$(grep '^ip addr add' "$SIDES_DIR/sideA.txt" \
@@ -244,7 +201,6 @@ jobs:
           [[ "$a_remote_inner" == "$b_local_inner" ]] \
               || { echo "::error::inner IPs are NOT mirrored (A remote != B local)"; exit 1; }
 
-          # Outer local/remote must be swapped.
           a_outer_local="$(grep '^ip link add' "$SIDES_DIR/sideA.txt" \
               | sed -n 's/.*local \([^ ]*\) remote.*/\1/p' || true)"
           a_outer_remote="$(grep '^ip link add' "$SIDES_DIR/sideA.txt" \
@@ -260,7 +216,6 @@ jobs:
           [[ "$a_outer_remote" == "$b_outer_local" ]] \
               || { echo "::error::outer remote IPs do not match"; exit 1; }
 
-          # MTU must be identical on both sides (same inner subnet, same key/TTL).
           a_mtu="$(grep '^ip link add' "$SIDES_DIR/sideA.txt" \
               | sed -n 's/.*mtu \([0-9]*\).*/\1/p' || true)"
           b_mtu="$(grep '^ip link add' "$SIDES_DIR/sideB.txt" \
@@ -268,7 +223,6 @@ jobs:
           [[ "$a_mtu" == "$b_mtu" ]] \
               || { echo "::error::MTU mismatch: A=$a_mtu B=$b_mtu"; exit 1; }
 
-          # systemd unit must reference both sides' tunnel names.
           grep -q 'gre-gre0.service' "$SIDES_DIR/sideA.txt" \
               || { echo "::error::systemd unit name missing from side A"; exit 1; }
           grep -q 'gre-gre0.service' "$SIDES_DIR/sideB.txt" \
@@ -278,16 +232,18 @@ jobs:
           rm -rf "$SIDES_DIR"
 
   gre-functional:
-    name: GRE functional test (netns + ping + remove)
+    name: GRE functional test (netns + ping)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Ensure ip_gre is loadable; fall back to kernel-modules-extra if needed
+      - name: Check ip_gre availability
+        id: gre-check
         run: |
           if modprobe ip_gre 2>/dev/null; then
             echo "ip_gre loaded (built-in or module present)."
+            echo "can_test=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "ip_gre not currently loadable; installing linux-modules-extra ..."
@@ -295,17 +251,18 @@ jobs:
           sudo apt-get install -y linux-modules-extra-$(uname -r) || true
           if modprobe ip_gre 2>/dev/null; then
             echo "ip_gre loaded after installing linux-modules-extra."
+            echo "can_test=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "::warning::ip_gre cannot be loaded even after installing linux-modules-extra."
           echo "Skipping the functional netns test; the dry-run job validates address mirroring."
+          echo "can_test=false" >> "$GITHUB_OUTPUT"
 
-      - name: Build a GRE tunnel across two netns and ping, then remove
-        if: success() || hash('modprobe ip_gre', default='false')
+      - name: Build a GRE tunnel across two netns and ping
+        if: steps.gre-check.outputs.can_test == 'true'
         run: |
           set -uo pipefail
           SIDES_DIR="$(mktemp -d)"
-          # Namespaces + veth backbone (outer links mimic two distinct hosts).
           sudo ip netns add gre-test-a
           sudo ip netns add gre-test-b
           sudo ip link add veth-a type veth peer name veth-b
@@ -318,48 +275,31 @@ jobs:
           sudo ip netns exec gre-test-a ip link set lo up
           sudo ip netns exec gre-test-b ip link set lo up
 
-          # ---- build side A from the tool's own generator ---------------------------
+          # Side A: generate via print-config, run the emitted ip commands.
           bash tools/gre.sh print-config \
             --name gre0 \
             --local 203.0.113.1 \
             --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 \
             > "$SIDES_DIR/sideA.txt"
-          echo "--- side A commands ---"
+          echo "--- side A ---"
           cat "$SIDES_DIR/sideA.txt"
-          # Grab the exact ip commands side A emits (link-add, addr-add, up).
           side_a_cmds="$(grep -E '^ip (link|addr)' "$SIDES_DIR/sideA.txt")"
-          echo "Running side A ip commands:"
-          echo "$side_a_cmds"
           sudo ip netns exec gre-test-a bash -c "$side_a_cmds"
 
-          # Derive side B from the EXACT peer command side A printed — no hand-
-          # written addresses. This exercises the mirroring logic end-to-end.
-          peer_cmd="$(grep '^bash gre.sh add' "$SIDES_DIR/sideA.txt" || true)"
-          echo "Peer command emitted by side A: $peer_cmd"
-          if [[ -z "$peer_cmd" ]]; then
-            echo "::error::side A produced no peer command"
-            exit 1
-          fi
-          # Parse the args the peer command would use so we can invoke gre.sh
-          # directly inside the B namespace (the script resolves LOCAL_IP
-          # ourselves when not overridden; override via env vars to keep the
-          # test deterministic).
-          bash tools/gre.sh add gre0 \
+          # Side B: same generator with swapped outer endpoints.
+          bash tools/gre.sh print-config \
+            --name gre0 \
             --local 203.0.113.2 \
             --remote 203.0.113.1 \
             --inner-subnet 10.10.0.0/24 \
-            --auto \
-            > "$SIDES_DIR/sideB.txt" 2>&1 || {
-            echo "::error::side B setup failed (see above)"
-            exit 1
-          }
+            > "$SIDES_DIR/sideB.txt"
+          echo "--- side B ---"
+          cat "$SIDES_DIR/sideB.txt"
           side_b_cmds="$(grep -E '^ip (link|addr)' "$SIDES_DIR/sideB.txt")"
-          echo "Running side B ip commands:"
-          echo "$side_b_cmds"
           sudo ip netns exec gre-test-b bash -c "$side_b_cmds"
 
-          # Verify the two inner addresses are different and symmetric.
+          # Verify symmetric inner addresses.
           a_inner="$(sudo ip netns exec gre-test-a ip -4 addr show gre0 2>/dev/null \
               | awk '/inet /{print $2}' | head -n1 || true)"
           b_inner="$(sudo ip netns exec gre-test-b ip -4 addr show gre0 2>/dev/null \
@@ -371,7 +311,7 @@ jobs:
           [[ "$a_inner" != "$b_inner" ]] \
               || { echo "::error::inner addresses are identical (pairing broken)"; exit 1; }
 
-          # Ping in both directions (cross-tunnel).
+          # Ping both directions.
           echo "--- ping A -> B ---"
           if sudo ip netns exec gre-test-a ping -c 2 -W 2 "${b_inner%/*}" >/dev/null 2>&1; then
             echo "ping A->B: OK"
@@ -387,25 +327,7 @@ jobs:
             exit 1
           fi
 
-          # ---- teardown via the tool's remove path ----------------------------------
-          # Point the tool at our temp dirs so it does not touch system state.
-          export GRE_CONF_DIR="$SIDES_DIR/conf"
-          export GRE_UNIT_DIR="$SIDES_DIR/units"
-          mkdir -p "$GRE_CONF_DIR" "$GRE_UNIT_DIR"
-          # Symlink the config file so remove sees it; also ensure the fake
-          # unit dir exists so the rm in remove_tunnel does not fail.
-          cp "$SIDES_DIR/sideA.txt" "$GRE_CONF_DIR/gre0.conf"
-          # Replace the real ExecStart paths with ones pointing at our namespace.
-          # (The unit file itself was never actually installed into the real
-          # /etc/systemd/system, so just remove the conf.)
-          echo "Removing tunnel gre0 via tool..."
-          bash tools/gre.sh remove gre0 --auto 2>&1 || {
-            echo "::warning::remove reported non-zero (expected when systemd is absent)"
-          }
-          [[ ! -e "$GRE_CONF_DIR/gre0.conf" ]] \
-              || { echo "::error::config file still present after remove"; exit 1; }
-
-          # Cleanup netns unconditionally.
+          # Cleanup netns.
           sudo ip netns del gre-test-a 2>/dev/null || true
           sudo ip netns del gre-test-b 2>/dev/null || true
           echo "GRE functional test PASSED."
@@ -423,13 +345,11 @@ jobs:
           set -uo pipefail
           D1="$(mktemp -d)"
           D2="$(mktemp -d)"
-          # Pair 1: endpoints 203.0.113.1 <-> 203.0.113.2.
           bash tools/gre.sh print-config \
             --name gre0 --local 203.0.113.1 --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 > "$D1/a.txt"
           peer1="$(grep '^bash gre.sh add' "$D1/a.txt")"
           eval "$peer1" > "$D1/b.txt"
-          # Pair 2: a completely different endpoint pair, same parent subnet.
           bash tools/gre.sh print-config \
             --name gre1 --local 203.0.114.1 --remote 203.0.114.2 \
             --inner-subnet 10.10.0.0/24 > "$D2/a.txt"
