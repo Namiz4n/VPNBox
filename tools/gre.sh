@@ -282,14 +282,6 @@ compute_inner_pair() {
 
     # Collect already-used inner IPs from config files and live links.
     local -A used=()
-    local c
-    for c in "${candidates[@]}"; do
-        # Each candidate is a /30 network base (multiple of 4).
-        # The usable inner IPs are base+1 and base+2.
-        local last="${c##*.}" prefix="${c%.*}"
-        used["${prefix}.$(( last + 1 ))"]=1
-        used["${prefix}.$(( last + 2 ))"]=1
-    done
     # Mark already-assigned pairs from stored configs.
     if [[ -d "$CONF_DIR" ]]; then
         local conf_f
