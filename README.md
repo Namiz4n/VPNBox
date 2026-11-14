@@ -1,4 +1,4 @@
-# Vpn-installation
+# VPN BOX
 
 Bash helpers for installing and managing a **OpenVPN** server, a
 **WireGuard** server, and a set of first-party VPN/proxy tools on a
