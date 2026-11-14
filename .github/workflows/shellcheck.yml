@@ -127,7 +127,7 @@ jobs:
            echo "=== strongSwan starter output ==="
            rc=0
            # Use timeout to prevent hanging on valid config; exit code 124 = healthy daemon
-           starter_out="$(timeout 10 /usr/lib/ipsec/starter --nofork 2>&1)" || rc=$?
+           starter_out="$(timeout 10 sudo /usr/lib/ipsec/starter --nofork 2>&1)" || rc=$?
            echo "$starter_out"
            if [[ "$rc" -eq 124 ]]; then
              echo "strongSwan starter ran for 10s without crashing (likely healthy)."
@@ -354,18 +354,18 @@ jobs:
             --name gre0 --local 203.0.113.2 --remote 203.0.113.1 \
             --inner-subnet 10.10.0.0/24 > "$D1/b.txt"
           # Simulate gre0 being installed: write its config so gre1 sees it.
-          cat > "$TEMP_CONF/gre0.conf" <<'CONF'
-            NAME=gre0
-            LOCAL_IP=203.0.113.1
-            REMOTE_IP=203.0.113.2
-            INNER_SUBNET=10.10.0.0/24
-            LOCAL_INNER=10.10.0.1
-            REMOTE_INNER=10.10.0.2
-            GRE_KEY=
-            GRE_TTL=
-            MTU=1476
-            FORWARDING=1
-          CONF
+          printf '%s\n' \
+            'NAME=gre0' \
+            'LOCAL_IP=203.0.113.1' \
+            'REMOTE_IP=203.0.113.2' \
+            'INNER_SUBNET=10.10.0.0/24' \
+            'LOCAL_INNER=10.10.0.1' \
+            'REMOTE_INNER=10.10.0.2' \
+            'GRE_KEY=' \
+            'GRE_TTL=' \
+            'MTU=1476' \
+            'FORWARDING=1' \
+            > "$TEMP_CONF/gre0.conf"
           bash tools/gre.sh print-config \
             --name gre1 --local 203.0.114.1 --remote 203.0.114.2 \
             --inner-subnet 10.10.0.0/24 > "$D2/a.txt"
