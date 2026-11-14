@@ -287,13 +287,10 @@ compute_inner_pair() {
         local conf_f
         for conf_f in "$CONF_DIR"/*.conf; do
             [[ -r "$conf_f" ]] || continue
-            # Source into locals without polluting current globals.
-            local src_LOCAL_INNER src_REMOTE_INNER
-            src_LOCAL_INNER=""; src_REMOTE_INNER=""
             # shellcheck disable=SC1090
             source "$conf_f"
-            [[ -n "$src_LOCAL_INNER" ]] && used["$src_LOCAL_INNER"]=1
-            [[ -n "$src_REMOTE_INNER" ]] && used["$src_REMOTE_INNER"]=1
+            [[ -n "${LOCAL_INNER:-}" ]] && used["$LOCAL_INNER"]=1
+            [[ -n "${REMOTE_INNER:-}" ]] && used["$REMOTE_INNER"]=1
         done
     fi
     # Mark currently-up links.
