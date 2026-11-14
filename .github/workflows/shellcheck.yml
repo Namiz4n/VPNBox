@@ -118,7 +118,7 @@ jobs:
               | sudo tee /etc/ipsec.conf >/dev/null
           awk '/^--- \/etc\/ipsec\.secrets$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
               | sudo tee /etc/ipsec.secrets >/dev/null
-          chmod 640 /etc/ipsec.secrets
+          sudo chmod 640 /etc/ipsec.secrets
           awk '/^--- \/etc\/xl2tpd\/xl2tpd\.conf$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
               | sudo tee /etc/xl2tpd/xl2tpd.conf >/dev/null
           awk '/^--- \/etc\/ppp\/options\.xl2tpd$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
@@ -343,6 +343,9 @@ jobs:
           set -uo pipefail
           D1="$(mktemp -d)"
           D2="$(mktemp -d)"
+          # Use a shared temp CONF_DIR so collision detection works across invocations.
+          TEMP_CONF="$(mktemp -d)"
+          export GRE_CONF_DIR="$TEMP_CONF"
           bash tools/gre.sh print-config \
             --name gre0 --local 203.0.113.1 --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 > "$D1/a.txt"
@@ -350,6 +353,19 @@ jobs:
           bash tools/gre.sh print-config \
             --name gre0 --local 203.0.113.2 --remote 203.0.113.1 \
             --inner-subnet 10.10.0.0/24 > "$D1/b.txt"
+          # Simulate gre0 being installed: write its config so gre1 sees it.
+          cat > "$TEMP_CONF/gre0.conf" <<'CONF'
+NAME=gre0
+LOCAL_IP=203.0.113.1
+REMOTE_IP=203.0.113.2
+INNER_SUBNET=10.10.0.0/24
+LOCAL_INNER=10.10.0.1
+REMOTE_INNER=10.10.0.2
+GRE_KEY=
+GRE_TTL=
+MTU=1476
+FORWARDING=1
+CONF
           bash tools/gre.sh print-config \
             --name gre1 --local 203.0.114.1 --remote 203.0.114.2 \
             --inner-subnet 10.10.0.0/24 > "$D2/a.txt"
