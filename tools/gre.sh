@@ -276,18 +276,18 @@ compute_inner_pair() {
     base_last="${net##*.}"
     # A /30 has 4 addresses; step through in increments of 4.
     step=$(( 1 << (32 - prefix) ))
-    # Iterate over all /30 blocks in the parent subnet.
-    for (( i = 0; i < step; i++ )); do
-        local cand_last=$(( (base_last / 4) * 4 + i ))
-        candidates+=("${net%.*}.${cand_last}")
+    # Iterate over all /30 block boundaries in the parent subnet.
+    for (( i = 0; i < step; i += 4 )); do
+        candidates+=("${net%.*}.${i}")
     done
 
     # Collect already-used inner IPs from config files and live links.
     local -A used=()
     local c
     for c in "${candidates[@]}"; do
-        used["${c%.0}.1"]=1
-        used["${c%.0}.2"]=1
+        local net_base="${c%.*}"
+        used["${net_base}.1"]=1
+        used["${net_base}.2"]=1
     done
     # Mark already-assigned pairs from stored configs.
     if [[ -d "$CONF_DIR" ]]; then
@@ -295,8 +295,8 @@ compute_inner_pair() {
         for conf_f in "$CONF_DIR"/*.conf; do
             [[ -r "$conf_f" ]] || continue
             # Source into locals without polluting current globals.
-            local src_NAME src_LOCAL_INNER src_REMOTE_INNER
-            src_NAME=""; src_LOCAL_INNER=""; src_REMOTE_INNER=""
+            local src_LOCAL_INNER src_REMOTE_INNER
+            src_LOCAL_INNER=""; src_REMOTE_INNER=""
             # shellcheck disable=SC1090
             source "$conf_f"
             [[ -n "$src_LOCAL_INNER" ]] && used["$src_LOCAL_INNER"]=1
@@ -326,8 +326,9 @@ compute_inner_pair() {
     local cand
     for cand in "${candidates[@]}"; do
         local a b
-        a="${cand%.0}.1"
-        b="${cand%.0}.2"
+        local cand_net="${cand%.*}"
+        a="${cand_net}.1"
+        b="${cand_net}.2"
         if [[ "$my_role" == "a" ]]; then
             if [[ -z "${used[$a]:-}" ]]; then
                 LOCAL_INNER="$a"
