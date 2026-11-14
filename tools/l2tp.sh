@@ -490,14 +490,15 @@ setup_forwarding() {
     # Always apply immediately, then persist. Use our comment tag so we
     # can delete exactly these rules on uninstall even when rules.v4 did
     # not previously exist.
-    grep -q "$FW_TAG" "$savefile" 2>/dev/null \
-        && warn "NAT/MSS rules for $FW_TAG already marked in $savefile; skipping re-write." || {
+    if ! grep -q "$FW_TAG" "$savefile" 2>/dev/null; then
         iptables -t nat -C POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE 2>/dev/null \
             || iptables -t nat -A POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE
         iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
             || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu
         netfilter-persistent save >/dev/null 2>&1 || true
-    }
+    else
+        warn "NAT/MSS rules for $FW_TAG already marked in $savefile; skipping re-write."
+    fi
 }
 
 # --- user management --------------------------------------------------------
@@ -611,8 +612,6 @@ compute_network_values() {
         fi
         IP_RANGE="${LOCAL_IP%.*}.$start-${LOCAL_IP%.*}.$end"
     fi
-    LOCAL_IP_RANGE_NET="${LOCAL_IP%.*}.0"
-
     PSK_VALUE="${PSK:-$(generate_psk)}"
     [[ "${#PSK_VALUE}" -ge 12 ]] || die "PSK too short (need >= 12 alphanumeric chars)."
     [[ "$PSK_VALUE" =~ ^[A-Za-z0-9]+$ ]] || die "PSK must be alphanumeric only."
