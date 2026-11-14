@@ -272,7 +272,7 @@ compute_inner_pair() {
 
     # Build all candidate /30 network bases under the parent.
     local -a candidates=()
-    local base_last step mask host_bits start_octet end_octet
+    local base_last step
     base_last="${net##*.}"
     # A /30 has 4 addresses; step through in increments of 4.
     step=$(( 1 << (32 - prefix) ))

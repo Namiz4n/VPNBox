@@ -126,7 +126,12 @@ jobs:
 
           echo "=== strongSwan starter output ==="
           rc=0
-          starter_out="$(/usr/lib/ipsec/starter --nofork --debug-all 2>&1)" || rc=$?
+          starter_out="$(/usr/lib/ipsec/starter --nofork 2>&1 &)" \
+               ; STARTER_PID=$!
+           sleep 2
+           kill "$STARTER_PID" 2>/dev/null || true
+           wait "$STARTER_PID" 2>/dev/null || true
+           starter_out="$(/usr/lib/ipsec/starter --nofork 2>&1)" || rc=$?
           echo "$starter_out"
           if [[ "$rc" -ne 0 ]]; then
             echo "::error::strongSwan starter failed (exit $rc); see above output"
@@ -162,7 +167,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Build side A and derive the peer command (side B)
+      - name: Build side A and side B configs (both via print-config)
         run: |
           set -uo pipefail
           SIDES_DIR="$(mktemp -d)"
@@ -172,15 +177,14 @@ jobs:
             --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 \
             > "$SIDES_DIR/sideA.txt"
-          peer_line="$(grep '^bash gre.sh add' "$SIDES_DIR/sideA.txt" || true)"
-          if [[ -z "$peer_line" ]]; then
-            echo "::error::side-A output has no peer-side command"
-            exit 1
-          fi
-          eval "$peer_line" > "$SIDES_DIR/sideB.txt" 2>&1 || {
-            echo "::error::peer command failed (see above)"
-            exit 1
-          }
+          # Side B uses the same generator with swapped outer endpoints;
+          # this avoids eval'ing the peer `add` command which requires root.
+          bash tools/gre.sh print-config \
+            --name gre0 \
+            --local 203.0.113.2 \
+            --remote 203.0.113.1 \
+            --inner-subnet 10.10.0.0/24 \
+            > "$SIDES_DIR/sideB.txt"
           echo "--- side A ---"
           cat "$SIDES_DIR/sideA.txt"
           echo "--- side B ---"
@@ -348,13 +352,16 @@ jobs:
           bash tools/gre.sh print-config \
             --name gre0 --local 203.0.113.1 --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 > "$D1/a.txt"
-          peer1="$(grep '^bash gre.sh add' "$D1/a.txt")"
-          eval "$peer1" > "$D1/b.txt"
+          # Side B via print-config (not eval) to avoid root requirement
+          bash tools/gre.sh print-config \
+            --name gre0 --local 203.0.113.2 --remote 203.0.113.1 \
+            --inner-subnet 10.10.0.0/24 > "$D1/b.txt"
           bash tools/gre.sh print-config \
             --name gre1 --local 203.0.114.1 --remote 203.0.114.2 \
             --inner-subnet 10.10.0.0/24 > "$D2/a.txt"
-          peer2="$(grep '^bash gre.sh add' "$D2/a.txt")"
-          eval "$peer2" > "$D2/b.txt"
+          bash tools/gre.sh print-config \
+            --name gre1 --local 203.0.114.2 --remote 203.0.114.1 \
+            --inner-subnet 10.10.0.0/24 > "$D2/b.txt"
 
           inner1_a="$(grep '^ip addr add' "$D1/a.txt" | awk '{print $5}' | cut -d/ -f1)"
           inner1_b="$(grep '^ip addr add' "$D1/a.txt" | awk '{print $7}')"
