@@ -355,7 +355,7 @@ EOF
     apt_get install iptables-persistent || warn "iptables-persistent not installed; NAT rules will not survive reboot."
     local savefile="/etc/iptables/rules.v4"
     if [[ -w "$savefile" ]] || true; then
-        grep -q 'MASQUERADE-vpn-install' "$savefile" 2>/dev/null || {
+        grep -q 'MASQUERADE-vpnbox' "$savefile" 2>/dev/null || {
             iptables -t nat -C POSTROUTING -o "$iface" -j MASQUERADE 2>/dev/null \
                 || iptables -t nat -A POSTROUTING -o "$iface" -j MASQUERADE
             iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \

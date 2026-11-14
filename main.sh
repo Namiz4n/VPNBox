@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# main.sh -- VPN Installation & Toolkit Menu
+# main.sh -- VPNBox Installation & Toolkit Menu
 #
 # Presents a menu to install/manage OpenVPN (via the pinned angristan
 # installer), WireGuard (via the standalone wireguard-install.sh in this
@@ -12,7 +12,7 @@
 # is left behind in the current working directory.
 #
 # One-liner:
-#   bash <(curl -Ls https://raw.githubusercontent.com/Namiz4n/Vpn-installation/refs/heads/main/main.sh)
+#   bash <(curl -Ls https://raw.githubusercontent.com/Namiz4n/VPNBox/refs/heads/main/main.sh)
 #
 # Override the repo ref used to fetch this repo's own child scripts:
 #   VPN_INSTALL_REF=my-branch bash <(curl -Ls ...)
@@ -27,7 +27,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # --- configuration ----------------------------------------------------------
-REPO="Namiz4n/Vpn-installation"
+REPO="Namiz4n/VPNBox"
 REF="${VPN_INSTALL_REF:-main}"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/refs/heads/${REF}"
 
@@ -51,7 +51,7 @@ run_remote_script() {
     local filename
     filename="${url##*/}"
     local tmp
-    tmp="$(mktemp /tmp/vpn-install.XXXXXX)"
+    tmp="$(mktemp /tmp/vpnbox.XXXXXX)"
 
     echo -e "${GREEN}Fetching ${filename}...${NC}" >&2
     if ! curl -fsSL --retry 3 -o "$tmp" "$url"; then
@@ -74,22 +74,22 @@ run_remote_script() {
 # --- main menu loop ---------------------------------------------------------
 while true; do
     clear
-    echo -e "${YELLOW}+--------------------------------------------------------+${NC}"
-    echo -e "${GREEN}|            VPN Installation & Toolkit Menu             |${NC}"
-    echo -e "${YELLOW}+--------------------------------------------------------+${NC}"
-    echo -e "${BLUE}|${YELLOW}  1.${NC} ${CYAN}OpenVPN (pinned angristan installer)${NC}               ${BLUE}|${NC}"
-    echo -e "${BLUE}|${YELLOW}  2.${NC} ${CYAN}WireGuard (standalone installer)${NC}                   ${BLUE}|${NC}"
-    echo -e "${YELLOW}+--------------------------------------------------------+${NC}"
-    echo -e "${BLUE}|${YELLOW}  3.${NC} ${CYAN}OpenConnect VPN (ocserv)${NC}                           ${BLUE}|${NC}"
-    echo -e "${BLUE}|${YELLOW}  4.${NC} ${CYAN}MTProto proxy (Telegram)${NC}                           ${BLUE}|${NC}"
-    echo -e "${YELLOW}+--------------------------------------------------------+${NC}"
-    echo -e "${BLUE}|${YELLOW}  5.${NC} ${CYAN}Cloudflare WARP${NC}                                    ${BLUE}|${NC}"
-    echo -e "${BLUE}|${YELLOW}  6.${NC} ${CYAN}PPTP VPN server${NC}                                    ${BLUE}|${NC}"
-    echo -e "${BLUE}|${YELLOW}  7.${NC} ${CYAN}L2TP/IPsec VPN server${NC}                              ${BLUE}|${NC}"
-    echo -e "${BLUE}|${YELLOW}  8.${NC} ${CYAN}GRE tunnel${NC}                                         ${BLUE}|${NC}"
-    echo -e "${YELLOW}+--------------------------------------------------------+${NC}"
-    echo -e "${BLUE}|${YELLOW}  0.${NC} ${RED}Quit${NC}                                               ${BLUE}|${NC}"
-    echo -e "${YELLOW}+--------------------------------------------------------+${NC}"
+    echo -e "${YELLOW}+----------------------------------------------------------------+${NC}"
+    echo -e "${GREEN}|              VPNBox Installation & Toolkit Menu               |${NC}"
+    echo -e "${YELLOW}+----------------------------------------------------------------+${NC}"
+    echo -e "${BLUE}|${YELLOW}  1.${NC} ${CYAN}OpenVPN (pinned angristan installer)${NC}                    ${BLUE}|${NC}"
+    echo -e "${BLUE}|${YELLOW}  2.${NC} ${CYAN}WireGuard (standalone installer)${NC}                         ${BLUE}|${NC}"
+    echo -e "${YELLOW}+----------------------------------------------------------------+${NC}"
+    echo -e "${BLUE}|${YELLOW}  3.${NC} ${CYAN}OpenConnect VPN (ocserv)${NC}                                 ${BLUE}|${NC}"
+    echo -e "${BLUE}|${YELLOW}  4.${NC} ${CYAN}MTProto proxy (Telegram)${NC}                                 ${BLUE}|${NC}"
+    echo -e "${YELLOW}+----------------------------------------------------------------+${NC}"
+    echo -e "${BLUE}|${YELLOW}  5.${NC} ${CYAN}Cloudflare WARP${NC}                                          ${BLUE}|${NC}"
+    echo -e "${BLUE}|${YELLOW}  6.${NC} ${CYAN}PPTP VPN server${NC}                                          ${BLUE}|${NC}"
+    echo -e "${BLUE}|${YELLOW}  7.${NC} ${CYAN}L2TP/IPsec VPN server${NC}                                    ${BLUE}|${NC}"
+    echo -e "${BLUE}|${YELLOW}  8.${NC} ${CYAN}GRE tunnel${NC}                                               ${BLUE}|${NC}"
+    echo -e "${YELLOW}+----------------------------------------------------------------+${NC}"
+    echo -e "${BLUE}|${YELLOW}  0.${NC} ${RED}Quit${NC}                                                     ${BLUE}|${NC}"
+    echo -e "${YELLOW}+----------------------------------------------------------------+${NC}"
     echo ""
     read -rp "Enter option number: " choice
 

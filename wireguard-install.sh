@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# https://github.com/Namiz4n/Vpn-installation
+# https://github.com/Namiz4n/VPNBox
 #
 # Based on the work of Nyr and contributors at:
 # https://github.com/Nyr/wireguard-install
@@ -303,7 +303,7 @@ show_header() {
 cat <<'EOF'
 
 WireGuard Script
-https://github.com/Namiz4n/Vpn-installation
+https://github.com/Namiz4n/VPNBox
 EOF
 }
 
@@ -311,7 +311,7 @@ show_header2() {
 cat <<'EOF'
 
 Welcome to this WireGuard server installer!
-GitHub: https://github.com/Namiz4n/Vpn-installation
+GitHub: https://github.com/Namiz4n/VPNBox
 EOF
 }
 

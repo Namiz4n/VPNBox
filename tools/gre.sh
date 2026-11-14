@@ -71,6 +71,10 @@
 # official docs alone; implementing one would be untestable in CI. This
 # tool therefore ships plaintext GRE only, and says so in the status
 # output and the final report.
+#
+# Test hooks (for CI / automated testing without root-owned system paths):
+#   GRE_CONF_DIR    override for /etc/gre-tunnels (default: /etc/gre-tunnels)
+#   GRE_UNIT_DIR    override for /etc/systemd/system (default: /etc/systemd/system)
 
 set -euo pipefail
 
@@ -80,9 +84,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-CONF_DIR="/etc/gre-tunnels"
+CONF_DIR="${GRE_CONF_DIR:-/etc/gre-tunnels}"
 SYSCTL="/etc/sysctl.d/90-gre.conf"
 MODULES="/etc/modules-load.d/gre.conf"
+UNIT_DIR="${GRE_UNIT_DIR:-/etc/systemd/system}"
 
 NAME=""
 LOCAL_IP=""
@@ -92,6 +97,8 @@ GRE_KEY=""
 GRE_TTL=""
 DO_FORWARDING=1
 AUTO=0
+
+FW_TAG="vpnbox-gre"
 
 log() { echo -e "${GREEN}$*${NC}"; }
 warn() { echo -e "${YELLOW}Warning: $*${NC}" >&2; }
@@ -217,6 +224,8 @@ NAME=${NAME}
 LOCAL_IP=${LOCAL_IP}
 REMOTE_IP=${REMOTE_IP}
 INNER_SUBNET=${INNER_SUBNET}
+LOCAL_INNER=${LOCAL_INNER}
+REMOTE_INNER=${REMOTE_INNER}
 GRE_KEY=${GRE_KEY}
 GRE_TTL=${GRE_TTL}
 MTU=${TUNNEL_MTU}
@@ -248,14 +257,94 @@ compute_mtu() {
 }
 
 compute_inner_pair() {
-    # /30 pair from the parent subnet: .1 and .2.
+    # Deterministic symmetric /30 assignment from the parent subnet.
+    # The side with the numerically lower public IP takes .1, the other
+    # takes .2. Both sides, running independently, always agree because
+    # they sort the same two endpoints the same way.
+    #
+    # Collision check: walk through existing tunnels' stored pairs and
+    # existing ip routes/dev addresses to find a free /30 under the
+    # parent subnet. For simplicity we increment the third octet of the
+    # parent net and reuse .1/.2 within it.
     local net="${INNER_SUBNET%/*}"
     local prefix="${INNER_SUBNET#*/}"
     [[ "$prefix" =~ ^[0-9]+$ ]] || die "Invalid CIDR: $INNER_SUBNET"
-    local last="${net##*.}"
-    LOCAL_INNER="${net%.*}.$last"
-    LOCAL_INNER="${LOCAL_INNER%.*}.1"
-    REMOTE_INNER="${LOCAL_INNER%.*}.2"
+
+    # Build all candidate /30 network bases under the parent.
+    local -a candidates=()
+    local base_last step mask host_bits start_octet end_octet
+    base_last="${net##*.}"
+    # A /30 has 4 addresses; step through in increments of 4.
+    step=$(( 1 << (32 - prefix) ))
+    # Iterate over all /30 blocks in the parent subnet.
+    for (( i = 0; i < step; i++ )); do
+        local cand_last=$(( (base_last / 4) * 4 + i ))
+        candidates+=("${net%.*}.${cand_last}")
+    done
+
+    # Collect already-used inner IPs from config files and live links.
+    local -A used=()
+    local c
+    for c in "${candidates[@]}"; do
+        used["${c%.0}.1"]=1
+        used["${c%.0}.2"]=1
+    done
+    # Mark already-assigned pairs from stored configs.
+    if [[ -d "$CONF_DIR" ]]; then
+        local conf_f
+        for conf_f in "$CONF_DIR"/*.conf; do
+            [[ -r "$conf_f" ]] || continue
+            # Source into locals without polluting current globals.
+            local src_NAME src_LOCAL_INNER src_REMOTE_INNER
+            src_NAME=""; src_LOCAL_INNER=""; src_REMOTE_INNER=""
+            # shellcheck disable=SC1090
+            source "$conf_f"
+            [[ -n "$src_LOCAL_INNER" ]] && used["$src_LOCAL_INNER"]=1
+            [[ -n "$src_REMOTE_INNER" ]] && used["$src_REMOTE_INNER"]=1
+        done
+    fi
+    # Mark currently-up links.
+    local link
+    for link in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | grep -E '^gre' || true); do
+        local addr
+        addr="$(ip -4 addr show "$link" 2>/dev/null | awk '/inet /{print $2}' | head -n1 || true)"
+        [[ -n "$addr" ]] && used["${addr%/*}"]=1
+        addr="$(ip -4 addr show "$link" 2>/dev/null | awk '/peer /{print $2}' | head -n1 || true)"
+        [[ -n "$addr" ]] && used["${addr%/*}"]=1
+    done
+
+    # Pick the best candidate: sort the two public IPs; lower gets .1.
+    local sorted_ips
+    if [[ "$(printf '%s\n%s\n' "$LOCAL_IP" "$REMOTE_IP" | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | sed -n '1p')" == "$LOCAL_IP" ]]; then
+        # LOCAL_IP is the lower endpoint -> it gets .1.
+        local my_role="a"
+    else
+        local my_role="b"
+    fi
+
+    local assigned=0
+    local cand
+    for cand in "${candidates[@]}"; do
+        local a b
+        a="${cand%.0}.1"
+        b="${cand%.0}.2"
+        if [[ "$my_role" == "a" ]]; then
+            if [[ -z "${used[$a]:-}" ]]; then
+                LOCAL_INNER="$a"
+                REMOTE_INNER="$b"
+                assigned=1
+                break
+            fi
+        else
+            if [[ -z "${used[$b]:-}" ]]; then
+                LOCAL_INNER="$b"
+                REMOTE_INNER="$a"
+                assigned=1
+                break
+            fi
+        fi
+    done
+    [[ "$assigned" -eq 1 ]] || die "No free /30 pair in $INNER_SUBNET (all addresses exhausted or colliding with existing tunnels)."
 }
 
 # --- ip commands (single source of truth) ----------------------------------
@@ -275,6 +364,14 @@ ip_link_add_cmd() {
 
 ip_addr_cmd() {
     printf 'ip addr add %s/30 peer %s dev %s\n' "$LOCAL_INNER" "$REMOTE_INNER" "$NAME"
+}
+
+ip_down_cmd() {
+    printf 'ip link set %s down\n' "$NAME"
+}
+
+ip_link_del_cmd() {
+    printf 'ip link delete %s\n' "$NAME"
 }
 
 ip_up_cmd() {
@@ -302,6 +399,9 @@ ExecStart=/bin/sh -c '\
   $(ip_link_add_cmd) 2>/dev/null || true; \
   $(ip_addr_cmd); \
   $(ip_up_cmd)'
+ExecStop=/bin/sh -c '\
+  $(ip_down_cmd) 2>/dev/null || true; \
+  $(ip_link_del_cmd) 2>/dev/null || true'
 RemainAfterExit=yes
 
 [Install]
@@ -337,6 +437,7 @@ EOF
     if ip link show "$NAME" >/dev/null 2>&1; then
         info "Link '$NAME' already exists; updating address/up."
         ip link set "$NAME" down 2>/dev/null || true
+        ip link delete "$NAME" 2>/dev/null || true
     fi
     eval "$(ip_link_add_cmd)"
     eval "$(ip_addr_cmd)"
@@ -351,7 +452,7 @@ EOF
 
     # systemd persistence for this tunnel.
     write_tunnel_file "$NAME"
-    install -m 0644 /dev/stdin "/etc/systemd/system/$(unit_name)" < <(render_unit)
+    install -m 0644 /dev/stdin "${UNIT_DIR}/$(unit_name)" < <(render_unit)
     systemctl daemon-reload
     systemctl enable "$(unit_name)" >/dev/null 2>&1 || true
     systemctl start "$(unit_name)" >/dev/null 2>&1 || true
@@ -387,28 +488,65 @@ allow_gre_firewall() {
 setup_forwarding() {
     local iface
     iface="$(default_iface)"
-    local savefile="/etc/iptables/rules.v4"
+    # Apply immediately AND persist. Install iptables-persistent if absent.
     apt_get install iptables-persistent >/dev/null 2>&1 || true
-    if [[ -e "$savefile" ]]; then
-        grep -q 'vpn-install-gre' "$savefile" 2>/dev/null || {
-            iptables -t nat -C POSTROUTING -o "$iface" -m comment --comment "vpn-install-gre" -j MASQUERADE 2>/dev/null \
-                || iptables -t nat -A POSTROUTING -o "$iface" -m comment --comment "vpn-install-gre" -j MASQUERADE
-            iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "vpn-install-gre" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
-                || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "vpn-install-gre" -j TCPMSS --clamp-mss-to-pmtu
-            netfilter-persistent save >/dev/null 2>&1 || true
-        }
-    fi
+    local savefile="/etc/iptables/rules.v4"
+    # Always insert the rules (they are idempotent via -C check below).
+    iptables -t nat -C POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE 2>/dev/null \
+        || iptables -t nat -A POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE
+    iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
+        || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu
+    # Persist to the canonical iptables-persistent location regardless of
+    # whether a rules.v4 file existed beforehand.
+    netfilter-persistent save >/dev/null 2>&1 || true
 }
 
 remove_tunnel() {
     local name="$1"
     require_root
     [[ -n "$name" ]] || die "Tunnel name required."
+    # Load the stored config so we know the public-tagged firewall rules
+    # to remove; fall back gracefully if the config is already gone.
+    local saved_remote=""
+    if [[ -r "$CONF_DIR/${name}.conf" ]]; then
+        # shellcheck disable=SC1090
+        source "$CONF_DIR/${name}.conf"
+        saved_remote="$REMOTE_IP"
+    fi
+    # Tear down the link (ignore errors — already gone is fine).
     ip link set "$name" down 2>/dev/null || true
     ip link delete "$name" 2>/dev/null || true
-    ip route del "$LOCAL_INNER"/30 2>/dev/null || true
-    rm -f "/etc/systemd/system/gre-${name}.service"
+    # Clean up any stray route that might remain.
+    if [[ -n "${LOCAL_INNER:-}" ]]; then
+        ip route del "${LOCAL_INNER%/30}"/30 2>/dev/null || true
+    fi
+    # Remove our systemd unit.
+    rm -f "${UNIT_DIR}/gre-${name}.service"
+    # Remove our config.
     rm -f "$CONF_DIR/${name}.conf"
+    # Firewall cleanup: remove the rule(s) we added, tagged with our FW_TAG.
+    local fw
+    fw="$(detect_firewall)"
+    case "$fw" in
+        ufw)
+            # ufw does not support deleting by-rule-content for raw-protocol
+            # rules added via `ufw allow in proto …`; best-effort removal
+            # is left to the uninstall path (which wipes everything).
+            ;;
+        firewalld)
+            firewall-cmd --permanent --remove-rich-rule="rule protocol value=\"gre\" source address=\"${saved_remote}\" accept" >/dev/null 2>&1 || true
+            firewall-cmd --reload >/dev/null 2>&1 || true
+            ;;
+        iptables)
+            iptables -D INPUT -p 47 -s "${saved_remote}" -j ACCEPT 2>/dev/null || true
+            # Also clean the NAT/MSS rules if forwarding was enabled.
+            local iface
+            iface="$(default_iface)"
+            iptables -t nat -D POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE 2>/dev/null || true
+            iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+            netfilter-persistent save >/dev/null 2>&1 || true
+            ;;
+    esac
     systemctl daemon-reload 2>/dev/null || true
     log "GRE tunnel '$name' removed."
 }
@@ -447,9 +585,9 @@ status() {
         ip addr show "$n" 2>/dev/null | grep -E 'inet |peer' | sed 's/^/      /' || true
         echo "    Routes:"
         ip route show dev "$n" 2>/dev/null | sed 's/^/      /' || true
-        if [[ -n "$REMOTE_IP" ]]; then
-            echo -n "    Ping to peer inner ($REMOTE_INNER): "
-            if ping -c 1 -W 2 "$REMOTE_INNER" >/dev/null 2>&1; then
+        if [[ -n "${REMOTE_IP:-}" ]]; then
+            echo -n "    Ping to peer inner (${REMOTE_INNER:-?}): "
+            if ping -c 1 -W 2 "${REMOTE_INNER:-?}" >/dev/null 2>&1; then
                 log "reached"
             else
                 warn "not reachable (peer may be down or firewall is blocking)"
@@ -480,7 +618,9 @@ print_config() {
     render_unit
     echo
     echo "--- peer-side non-interactive command (run on the REMOTE host)"
-    # Swapped: what was local becomes remote and vice versa.
+    # Swapped: what was local becomes remote and vice versa. The peer
+    # command passes the mirrored inner addresses explicitly so both
+    # sides compute the same pair deterministically.
     local peer_key="$GRE_KEY" peer_ttl="$GRE_TTL"
     local -a peer_args=()
     if [[ -n "$REMOTE_IP" ]]; then
@@ -492,20 +632,66 @@ print_config() {
     if [[ -n "$peer_ttl" ]]; then
         peer_args+=(--ttl "$peer_ttl")
     fi
-    printf 'bash gre.sh add %s %s --auto --inner-subnet %s\n' "$NAME" "${peer_args[*]}" "$INNER_SUBNET"
+    # Explicitly pass the mirrored inner addresses so the peer computes
+    # the same /30 but assigns LOCAL_INNER=REMOTE_INNER_of_us and
+    # REMOTE_INNER=LOCAL_INNER_of_us.
+    printf 'bash gre.sh add %s %s --auto --inner-subnet %s --inner-local %s --inner-remote %s\n' \
+        "$NAME" "${peer_args[*]}" "$INNER_SUBNET" "$REMOTE_INNER" "$LOCAL_INNER"
 }
 
 # --- uninstall ----------------------------------------------------------------
 uninstall() {
     require_root
+    # Collect all tunnel names from config files AND live links so we
+    # don't miss any.
+    local -a all_names=()
+    if [[ -d "$CONF_DIR" ]]; then
+        local f
+        for f in "$CONF_DIR"/*.conf; do
+            [[ -e "$f" ]] || continue
+            all_names+=("$(basename "$f" .conf)")
+        done
+    fi
+    local live
+    for live in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | grep -E '^gre'); do
+        # Avoid duplicates.
+        local seen=0
+        local n
+        for n in "${all_names[@]+"${all_names[@]}"}"; do
+            [[ "$n" == "$live" ]] && seen=1 && break
+        done
+        [[ "$seen" -eq 0 ]] && all_names+=("$live")
+    done
     local n
-    for n in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | grep -E '^gre' || true); do
-        ip link delete "$n" 2>/dev/null || true
-        rm -f "/etc/systemd/system/gre-${n}.service"
+    for n in "${all_names[@]+"${all_names[@]}"}"; do
+        remove_tunnel "$n"
     done
     rm -rf "$CONF_DIR"
     systemctl daemon-reload 2>/dev/null || true
     rm -f "$MODULES" "$SYSCTL"
+    # Clean up the NAT/MSS rules we added (regardless of whether any
+    # tunnels remained).
+    local fw iface
+    fw="$(detect_firewall)"
+    iface="$(default_iface)"
+    case "$fw" in
+        ufw)
+            # ufw cannot enumerate/delete individual raw-protocol rules;
+            # document that manual cleanup may be needed.
+            warn "UFW: manually remove GRE (proto 47) rules if needed."
+            ;;
+        firewalld)
+            # Remove any rich rule matching our tag pattern.
+            firewall-cmd --permanent --remove-rich-rule="rule protocol value=\"gre\" accept" >/dev/null 2>&1 || true
+            firewall-cmd --reload >/dev/null 2>&1 || true
+            ;;
+        iptables)
+            iptables -D INPUT -p 47 -s 0.0.0.0/0 -j ACCEPT 2>/dev/null || true
+            iptables -t nat -D POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE 2>/dev/null || true
+            iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+            netfilter-persistent save >/dev/null 2>&1 || true
+            ;;
+    esac
     log "All GRE tunnels removed and persistence files deleted."
 }
 
@@ -543,6 +729,8 @@ while [[ $# -gt 0 ]]; do
         --key) GRE_KEY="${2:-}"; shift 2 ;;
         --ttl) GRE_TTL="${2:-}"; shift 2 ;;
         --no-forwarding) DO_FORWARDING=0; shift ;;
+        --inner-local) LOCAL_INNER="${2:-}"; shift 2 ;;
+        --inner-remote) REMOTE_INNER="${2:-}"; shift 2 ;;
         add)
             cmd="add"; shift
             NAME="${1:-${GRE_TUNNEL_NAME:-}}"
@@ -584,6 +772,14 @@ main() {
     case "$cmd" in
         add)
             validate_inputs
+            # If the caller passed explicit inner addresses (as the
+            # peer-command does), honour them instead of recomputing.
+            if [[ -n "${LOCAL_INNER:-}" && -n "${REMOTE_INNER:-}" ]]; then
+                compute_mtu
+            else
+                compute_mtu
+                compute_inner_pair
+            fi
             if [[ "$AUTO" -eq 1 && ! -t 0 ]]; then
                 create_tunnel
             elif [[ -t 0 ]]; then
@@ -604,6 +800,8 @@ main() {
             ;;
         print-config)
             validate_inputs
+            compute_mtu
+            compute_inner_pair
             print_config
             ;;
         uninstall)
@@ -672,6 +870,8 @@ management_menu() {
                 NAME="${NAME:-$(next_name)}"
                 REMOTE_IP="${REMOTE_IP:-}"
                 validate_inputs
+                compute_mtu
+                compute_inner_pair
                 print_config
                 ;;
             6)

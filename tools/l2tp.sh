@@ -22,17 +22,18 @@
 #   L2TP-over-IPsec road-warrior from Windows/Android clients is the
 #   standard case, and it uses IKEv1 (with PFS off, transport-mode ESP
 #   carrying UDP/1701). IKEv2 L2TP is not the standard Windows client
-#   mode, so we use ikev1 with aes256-gcm/sha2-256/modp-2048, falling
-#   back to aes128-sha1-modp-1024 for older clients. The connection is
-#   configured with keyingtries=%forever and rightsourceip=%config so
-#   clients get their address from xl2tpd, not from IPsec mode config.
+#   mode, so we use ikev1. The proposal set intentionally excludes
+#   AES-GCM for IKE (native Windows/iOS/Android L2TP clients do not
+#   offer it) and prefers AES-CBC with SHA-1/SHA-2 and DH groups those
+#   clients actually negotiate (modp1024, modp1536, modp2048). See:
+#     https://docs.strongswan.org/docs/latest/config/proposals.html
+#     https://docs.strongswan.org/docs/latest/interop/windowsClients.html
+#     https://wiki.strongswan.org/projects/strongswan/wiki/ConnSection
 #
 # NETWORK MODEL:
 #   IPsec (UDP 500/4500, NAT-T) is the only public surface. L2TP
 #   (UDP 1701) runs ONLY inside the IPsec tunnel (RFC 3931 + the
-#   strongSwan/xl2tpd L2TP/IPsec model -- see also the ipsec saref
-#   directive in xl2tpd.conf which ties L2TP sessions to the IPsec SA).
-#   Never open UDP 1701 publicly.
+#   strongSwan/xl2tpd L2TP/IPsec model). Never open UDP 1701 publicly.
 #
 # UX (this script is self-contained and also launched with no arguments
 # from main.sh):
@@ -93,7 +94,7 @@
 #     IKEv2 or WireGuard for many-behind-one-NAT; this tool does NOT
 #     implement IKEv2 L2TP (see TODO below).
 #   * TODO (not implemented): IKEv2 L2TP/IPsec mode. If you need it,
-#     see strongswan's IKEv2 + L2TP examples; it requires a different
+#     see strongSwan's IKEv2 + L2TP examples; it requires a different
 #     client setup and is not the Windows/Android standard.
 
 set -euo pipefail
@@ -111,7 +112,7 @@ PPP_OPTIONS="/etc/ppp/options.xl2tpd"
 CHAP_SECRETS="/etc/ppp/chap-secrets"
 SYSCTL="/etc/sysctl.d/90-l2tp.conf"
 MODULES="/etc/modules-load.d/l2tp-ipsec.conf"
-FW_TAG="vpn-install-l2tp"
+FW_TAG="vpnbox-l2tp"
 SERVICE_IPSEC="strongswan-starter"
 SERVICE_XL2TPD="xl2tpd"
 
@@ -244,8 +245,30 @@ generate_password() {
 
 # --- config rendering -------------------------------------------------------
 render_ipsec_conf() {
-    # Classic stroke format. %default carries the road-warrior base; the
-    # l2tp conn pins the protocol port so charon only matches L2TP.
+    # Classic stroke format. Per strongSwan docs and the conn section wiki:
+    #   * type=transport — ESP encapsulates the L2TP UDP packet directly
+    #     (RFC 3931 / RFC 4306 section 3.16). This is what Windows/iOS/
+    #     Android L2TP clients expect.
+    #   * leftprotoport=17/1701 pins IKE to UDP/1701 on the local side.
+    #   * rightprotoport=17/%any matches any client port (iOS/Android pick
+    #     a random ephemeral port for L2TP).
+    #   * leftsubnet and leftsourceip are omitted — they belong to tunnel-
+    #     mode configs, not transport-mode L2TP road-warriors.
+    #   * rightsourceip=%config tells charon to hand the client an address
+    #     from xl2tpd's pool, not from IPsec (the IP is allocated by pppd
+    #     talking to xl2tpd).
+    #   * proposals avoid AES-GCM for IKE (Windows/iOS/Android L2TP clients
+    #     do not propose it); we list aes256-sha2_256-modp2048 then
+    #     aes128-sha1-modp1024 as fallback so the wide variety of native
+    #     clients can connect.
+    #   * Aggressive mode (`aggr`) is a Libreswan keyword; strongSwan does
+    #     not recognise it. We keep the default (main mode).
+    #
+    # Sources verified:
+    #   https://wiki.strongswan.org/projects/strongswan/wiki/ConnSection
+    #   https://docs.strongswan.org/docs/latest/config/proposals.html
+    #   https://docs.strongswan.org/docs/latest/interop/windowsClients.html
+    #
     cat <<EOF
 # /etc/ipsec.conf -- written by l2tp.sh (classic stroke format; see header
 # of this script for why swanctl is not used).
@@ -255,28 +278,25 @@ config setup
 
 conn %default
     keyexchange=ikev1
-    ike=aes256gcm128-sha256-modp2048!
-    esp=aes256gcm128!
+    ike=aes256-sha2_256-modp2048,aes128-sha1-modp1024!
+    esp=aes256-sha2_256,aes128-sha1!
     dpddelay=300
     dpdtimeout=60
     dpdaction=clear
     keyingtries=%forever
     rekey=no
-    aggr=no
     left=%defaultroute
-    leftsubnet=${PUBLIC_IP}/32
-    leftfirewall=no
+    leftfirewall=yes
     auto=add
 
 conn l2tp
     also=%default
     authby=psk
     left=${PUBLIC_IP}
-    leftsubnet=${PUBLIC_IP}/32
-    leftsourceip=${LOCAL_IP_RANGE_NET}/32
+    leftprotoport=17/1701
     right=%any
-    rightsourceip=%config
-    rightprotoport=17/1701
+    rightprotoport=17/%any
+    rightsubnetwithin=0.0.0.0/0
     auto=add
 EOF
 }
@@ -292,24 +312,31 @@ EOF
 render_xl2tpd_conf() {
     cat <<EOF
 ; /etc/xl2tpd/xl2tpd.conf -- written by l2tp.sh
+; Keywords use `keyword = value` form per xl2tpd.conf(5).
 [global]
 port = 1701
 listen-addr = ${PUBLIC_IP}
-; Tie L2TP sessions to the IPsec SA (SAREF). Required for L2TP/IPsec.
-ipsec saref = yes
+; SAref (Security Association reference) ties L2TP sessions to the IPsec SA.
+; It only works with Openswan KLIPS in mast mode, not with strongSwan's
+; XFRM-based stack. xl2tpd itself warns that SAref does not work with the
+; Linux kernel L2TP mode. Keep it disabled here.
+ipsec saref = no
 
 [lns default]
 ; pppd-side authentication is configured in the pppoptfile, not here.
 ; The values below are xl2tpd keyword spellings (space-separated), per
 ; xl2tpd.conf(5).
-require authentication
-refuse pap
-refuse chap
-refuse eap
+require authentication = yes
+refuse pap = yes
+refuse chap = yes
+refuse eap = yes
 ; Assign client IPs from this range (the pppd options file sets
 ; require-mschap-v2 and ms-dns; see $PPP_OPTIONS).
-assign ip
-local ip = ${PUBLIC_IP}
+assign ip = yes
+; `local ip` is the inside address of THIS xl2tpd instance — it becomes
+; the peer address in the PPP session and must be within the client
+; subnet, NOT the server's public IP.
+local ip = ${LOCAL_IP}
 ip range = ${IP_RANGE}
 name = xl2tpd0
 hostname = ${PUBLIC_IP}
@@ -460,8 +487,11 @@ setup_forwarding() {
 
     apt_get install iptables-persistent || warn "iptables-persistent not installed; NAT rules will not survive reboot."
     local savefile="/etc/iptables/rules.v4"
-    grep -q "$FW_TAG" "$savefile" 2>/dev/null || {
-        # Marked rules so we can clean them up on uninstall.
+    # Always apply immediately, then persist. Use our comment tag so we
+    # can delete exactly these rules on uninstall even when rules.v4 did
+    # not previously exist.
+    grep -q "$FW_TAG" "$savefile" 2>/dev/null \
+        && warn "NAT/MSS rules for $FW_TAG already marked in $savefile; skipping re-write." || {
         iptables -t nat -C POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE 2>/dev/null \
             || iptables -t nat -A POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE
         iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
@@ -574,7 +604,7 @@ compute_network_values() {
     if [[ -n "$IP_RANGE_OVERRIDE" ]]; then
         IP_RANGE="$IP_RANGE_OVERRIDE"
     else
-        local start="10" end="200"
+        local start=10 end=200
         if [[ "$prefix" -gt 24 ]]; then
             end=$(( start + ((1 << (32 - prefix)) - 1) - 1 ))
             [[ $end -le 254 ]] || end=254
@@ -605,7 +635,7 @@ guided_install() {
     fi
     echo
     info "Note: Windows L2TP/IPsec from behind NAT may need the registry key"
-    info "HKLM\SYSTEM\CurrentControlSet\Services\PolicyAgent\EnableTransportModeDirectAccess"
+    info "HKLM\\SYSTEM\\CurrentControlSet\\Services\\PolicyAgent\\EnableTransportModeDirectAccess"
     info "set to 1 (DWORD). Multiple clients behind the SAME NAT cannot connect"
     info "simultaneously. IKEv2 is the recommended alternative (not implemented"
     info "by this tool -- see the header TODO)."
