@@ -428,7 +428,7 @@ jobs:
           # Run the tool's remove path. Must NOT emit the old "manually
           # remove GRE rules" advisory (that comment was removed from the
           # script in this PR — keep the assertion there to catch regressions).
-          bash tools/gre.sh remove gre0 >/tmp/remove-gre.log 2>&1
+          sudo bash tools/gre.sh remove gre0 >/tmp/remove-gre.log 2>&1
           grep -q 'UFW: manually remove' /tmp/remove-gre.log \
               && { echo "::error::remove still prints manual-cleanup warning"; exit 1; }
           # Both active and recorded state must be clear now.
@@ -454,7 +454,7 @@ jobs:
           sudo ufw --force insert 2 "allow in proto 47 from $REMOTE any"
           sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
               || { echo "::error::rule missing before uninstall"; exit 1; }
-          bash tools/gre.sh uninstall >/tmp/uninstall-gre.log 2>&1
+          sudo bash tools/gre.sh uninstall >/tmp/uninstall-gre.log 2>&1
           grep -q 'UFW: manually remove' /tmp/uninstall-gre.log \
               && { echo "::error::uninstall still prints manual-cleanup warning"; exit 1; }
           sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
