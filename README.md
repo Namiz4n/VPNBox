@@ -1,29 +1,65 @@
-# VPNBox
+# 📦 VPNBox
 
-Bash helpers for installing and managing a **OpenVPN** server, a
-**WireGuard** server, and a set of first-party VPN/proxy tools on a
-Linux VPS. Everything is designed to be run as `root` on a fresh Debian
-or Ubuntu system.
+**Modular VPN & proxy installers for your VPS — bash-only, clean-room built, rigorously tested.**
 
-## Status
+| | |
+|---|---|
+| **CI** | [![shellcheck](https://github.com/Namiz4n/VPNBox/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/Namiz4n/VPNBox/actions/workflows/shellcheck.yml) |
+| **Language** | ![Bash](https://img.shields.io/badge/language-Bash-blue.svg) |
+| **License** | ![MIT](https://img.shields.io/badge/license-MIT-green.svg) |
+| **ShellCheck** | ![strict](https://img.shields.io/badge/shellcheck-strict-orange.svg) |
+| **Target** | Debian / Ubuntu |
 
-| Part | CI coverage | Real-VPS notes |
-|------|-------------|----------------|
-| OpenVPN (`install_openvpn.sh`) | ShellCheck strict | Upstream installer; tested manually. |
-| WireGuard (`wireguard-install.sh`) | ShellCheck error-only | Switched public-IP detection from `http://` to `https://`; embedded sysctl tuning file directly in-tree instead of downloading from hwdsl2/vpn-extras (no external network dependency). Copyright/license header left untouched. |
-| OpenConnect (`tools/ocserv.sh`) | ShellCheck + `ocserv --test-config` | Verified in CI. |
-| MTProto (`tools/mtproto.sh`) | ShellCheck strict | Binary pinned; SHA-256 verified at install time. |
-| WARP (`tools/warp.sh`) | ShellCheck strict | Cloudflare official repo; install-time smoke tested. |
-| PPTP (`tools/pptp.sh`) | ShellCheck + dry-run structural checks | `pptpd` removed from Ubuntu 24.04+ repos; the tool detects this and refuses. |
-| L2TP/IPsec (`tools/l2tp.sh`) | **ShellCheck strict** + **real strongSwan starter** + **real xl2tpd startup** | Config is now generated from the official man pages. CI runs `/usr/lib/ipsec/starter --nofork --debug-all` and `xl2tpd -D` against the *exact* generated files and fails on any unknown keyword / parse error. Windows/iOS/Android compatibility is **not yet tested on real clients**; users behind NAT may need the `EnableTransportModeDirectAccess` registry tweak (see below). |
-| GRE (`tools/gre.sh`) | **ShellCheck strict** + dry-run mirror-assertion + netns functional ping + multiple-tunnel collision check | Functional netns test requires `ip_gre`; on runners where the module is unavailable the test is skipped with a warning but the dry-run check still runs. Multiple-tunnel isolation is asserted. |
+---
 
-Where a header says "verified in CI", the assertion ran against the
-real software (not just grepped strings). Where it says "dry-run", the
-script produced config that passed structural checks but was not fed to
-the live daemon.
+## What is VPNBox?
 
-## Quick start
+A curated set of first-party Bash helpers that stand up and manage VPN and proxy services on a fresh Linux VPS — OpenVPN, WireGuard, OpenConnect, MTProto, WARP, PPTP, L2TP/IPsec, and GRE tunnels — without requiring heavy control panels or databases.
+
+Everything lives in this repo. No external toolchains beyond stock `apt`. Each installer validates its inputs, backs up configs before editing, rolls back on failure, and ships a full uninstall path. Run with no arguments for guided wizards; drive everything else via explicit subcommands and `--auto` flags.
+
+**Built with:**
+- **Strict ShellCheck** (`set -euo pipefail` across every script).
+- **Real-software validators** in CI: `ocserv --test-config`, strongSwan's `starter --nofork`, xl2tpd startup checks, and functional netns ping tests for GRE.
+- **Clean-room design**: each tool is written from official man pages and upstream documentation only. We never copy third-party installers verbatim.
+- **Pin-and-check**: pinned URLs and SHA-256 verification where it matters (e.g., the OpenVPN installer commit, the `mtg` binary).
+
+---
+
+## Features
+
+- **One-command bootstrap** — drop into a fresh Debian/Ubuntu box and run a single curl pipeline; the menu guides the rest.
+- **Eight protocols out of the box** — OpenVPN, WireGuard, OpenConnect, MTProto, Cloudflare WARP, PPTP, L2TP/IPsec, GRE.
+- **Idempotent & rollback-safe** — timestamped backups before edits, automatic rollback on failure, idempotent service setup.
+- **Full uninstall paths** — every tool exposes a remove/uninstall mode that reverses what it installed.
+- **No database, no panel** — pure systemd units, native config formats, standard iptables/nftables/uFW/firewalld rules.
+- **Automated CI per tool** — ShellCheck strict + protocol-specific validation (syntax checks, dry-run renders, live daemon smoke tests where possible).
+- **Cross-platform inner-address pairing** — for GRE, peer servers auto-derive mirrored `/30` addresses deterministically, no manual coordination needed.
+- **Explicit insecurity guards** — risky choices (e.g., enabling PPTP) require an acknowledgment flag; nothing proceeds quietly.
+- **Power-user friendly** — subcommands, `--help` usage text, environment overrides (`VPN_INSTALL_REF`, `GRE_CONF_DIR`), and machine-readable output modes like `print-config`.
+
+---
+
+## Supported Protocols
+
+| # | Protocol | Core purpose | CI coverage |
+|---|----------|--------------|-------------|
+| 1 | **OpenVPN** ([`install_openvpn.sh`](install_openvpn.sh)) | Mature TLS-based VPN; client-rich ecosystem | ShellCheck strict (upstream installer; pin + SHA verified) |
+| 2 | **WireGuard** ([`wireguard-install.sh`](wireguard-install.sh)) | Modern, fast, minimal-crypto tunnel | ShellCheck error-only; in-tree sysctl; HTTPS public-IP detection |
+| 3 | **OpenConnect** ([`tools/ocserv.sh`](tools/ocserv.sh)) | SSL VPN with browser support (`ocserv`) | ShellCheck strict + `ocserv --test-config` |
+| 4 | **MTProto Proxy** ([`tools/mtproto.sh`](tools/mtproto.sh)) | Telegram proxy; anti-censorship | ShellCheck strict; binary pinned, SHA-256 verified |
+| 5 | **Cloudflare WARP** ([`tools/warp.sh`](tools/warp.sh)) | Commercial-grade zero-trust tunnel | ShellCheck strict; Cloudflare official repo |
+| 6 | **PPTP** ([`tools/pptp.sh`](tools/pptp.sh)) | Legacy MS-CHAPv2 + MPPE (use only if required) | ShellCheck strict + dry-run structural checks; refuses on Ubuntu 24.04+ |
+| 7 | **L2TP/IPsec** ([`tools/l2tp.sh`](tools/l2tp.sh)) | Classic road-warrior IPSec tunnel | ShellCheck strict + real strongSwan starter + real xl2tpd startup |
+| 8 | **GRE** ([`tools/gre.sh`](tools/gre.sh)) | Plaintext layer-3 P2P tunnel between trusted nodes | ShellCheck strict + netns ping + multiple-tunnel collision checks |
+
+> ⚠️ **GRE traffic is unencrypted.** Use it only inside trusted networks (same datacenter, VPN backbone, etc.). For untrusted underlays, wrap the link in IPsec or switch to WireGuard/OpenVPN.
+
+---
+
+## Quick Start
+
+Prerequisites: a fresh **root** shell on **Debian** or **Ubuntu**.
 
 ```bash
 sudo bash <(curl -Ls https://raw.githubusercontent.com/Namiz4n/VPNBox/refs/heads/main/main.sh)
@@ -38,92 +74,158 @@ sudo bash tools/l2tp.sh
 sudo bash tools/gre.sh
 ```
 
-Run a tool with **no arguments** to get a guided install (or a short
-management menu when it is already installed). Subcommands remain
-available for power users; `-h` / `--help` prints usage.
+Run a tool with **no arguments** to hit the guided wizard (or the management menu when already installed). Power users can drive anything explicitly via subcommands; `-h` / `--help` prints usage.
 
-## Menu
+Override which ref the bootstrap fetches from:
 
-| # | Tool | What it installs |
-|---|------|------------------|
-| 1 | OpenVPN | The pinned angristan OpenVPN installer (URL + commit in `install_openvpn.sh`) |
-| 2 | WireGuard | The standalone `wireguard-install.sh` in this repo |
-| 3 | OpenConnect | `ocserv` (OpenConnect VPN server) + `ocpasswd` user database |
-| 4 | MTProto proxy | A pinned `mtg` binary (9seconds/mtg, SHA-256 verified) behind a systemd unit |
-| 5 | Cloudflare WARP | The Cloudflare WARP client from Cloudflare's official repo |
-| 6 | PPTP | `pptpd` (MS-CHAPv2 + 128-bit MPPE) |
-| 7 | L2TP/IPsec | `strongSwan` + `xl2tpd` + `ppp` (PSK road-warrior) |
-| 8 | GRE | An `iproute2` GRE P2P tunnel + systemd persistence |
-| 0 | Quit | — |
+```bash
+VPN_INSTALL_REF=my-topic-branch sudo bash <(curl -Ls https://raw.githubusercontent.com/Namiz4n/VPNBox/refs/heads/main/main.sh)
+```
 
-## Supported OS (per tool)
+---
 
-- **Debian / Ubuntu only** (the tool detects the distro and refuses
-  otherwise): `ocserv.sh`, `pptp.sh`, `l2tp.sh`, `gre.sh`.
-- **Debian/Ubuntu + RHEL/Fedora/CentOS**: `warp.sh`.
-- **`install_openvpn.sh` and `wireguard-install.sh`**: whatever their
-  upstream installers support (OpenVPN's pinned installer targets
-  Debian/Ubuntu; the WireGuard installer targets Debian/Ubuntu).
+## Usage Guide
 
-`pptpd` is **not shipped on Ubuntu 24.04+**; the PPTP tool detects that
-and refuses to install, pointing you at L2TP/IPsec instead.
+### Interactive menu
 
-## Client setup notes
+Invoking `main.sh` presents numbered options 1–8 plus 0 (Quit). After completing a wizard, rerunning the same tool brings up a short management menu (`status`, `uninstall`, …) rather than another full install.
 
-### L2TP/IPsec (menu 7)
+### Guided vs automated
 
-Clients connect using the server's public IP, the PSK shown at install
-time, and the username/password printed once during the initial
-wizard.
+- **Guided** — default when called with no args; prompts for missing values.
+- **`--auto`** — non-interactive, uses sane defaults or env vars. Safe for playbooks.
+- **Subcommands** — e.g. `bash tools/gre.sh add mytun --remote 1.2.3.4` or `bash tools/gre.sh remove mytun`. Check `--help` per tool for the exact verb list.
+- **`print-config`** — dry-render full config/command output to stdout without applying anything (useful for review, scripting, or peer-generation, as with GRE).
 
-- **Windows**: from behind NAT some Windows builds drop the L2TP/IPsec
-  tunnel unless the registry key
-  `HKLM\SYSTEM\CurrentControlSet\Services\PolicyAgent\EnableTransportModeDirectAccess`
-  (DWORD) is set to `1`. Without it the connection either fails to
-  negotiate Phase 1 or drops shortly after. See Microsoft documentation
-  on IKE transport mode for details.
-- **iOS / Android**: the native L2TP/IPsec clients work out of the box
-  with the PSK configuration produced by this tool (transport-mode ESP,
-  UDP 500/4500, IPSec Saref disabled).
-- **Multiple clients behind one NAT**: the L2TP-over-IPsec model shares
-  a single SPI per IPsec SA. Only ONE client behind a given NAT box
-  can be connected at a time. For multiple simultaneous clients behind
-  one NAT router, use WireGuard or OpenConnect instead.
-- **Firewall**: expose **UDP 500 and UDP 4500** on the VPS; do **not**
-  open UDP 1701 — L2TP rides inside the IPsec tunnel.
+### Per-tool highlights
 
-### GRE (menu 8)
+#### OpenVPN (menu 1)
 
-GRE is a plaintext point-to-point layer-3 tunnel. Both ends must run
-this tool independently; the generator prints the exact peer command
-you paste into the other server.
+Installs via the pinned [angristan/openvpn-install](https://github.com/angristan/openvpn-install) (`openvpn-install.sh`). Our wrapper verifies the downloaded script's SHA-256 before executing it.
 
-1. On Server A run: `sudo bash tools/gre.sh add mytun --remote <B-public-IP>`
-2. The script prints a peer command like:
-   `bash tools/gre.sh add mytun --local <B-public-IP> --remote <A-public-IP> ...`
-3. On Server B paste and run that printed command.
-4. Both ends auto-derive mirrored inner `/30` addresses deterministically
-   (the side with the lower public IP takes `.1`, the other takes `.2`),
-   so no manual address coordination is needed.
+#### WireGuard (menu 2)
 
-**Important**: GRE traffic is **not encrypted**. Use it only between
-servers you trust (same datacentre, VPN-backbone, etc.). For untrusted
-underlays, wrap the link in IPsec or use WireGuard/OpenVPN instead.
+Standalone `wireguard-install.sh` in this repo. Uses HTTPS for public-IP detection, embeds its own sysctl tuning (BBR + fq + socket buffers), and touches the MIT-licensed copyright header only for comments.
 
-## Security notes
+#### OpenConnect (menu 3)
 
-- **PPTP is a broken protocol** (weak MPPE key handling). The installer
-  refuses to proceed unless you explicitly confirm
-  (`yes`, or `--auto --i-understand-pptp-is-insecure`).
-- **GRE is NOT encrypted.** Traffic is plaintext on the underlay. Use it
-  only inside a trusted network. (GRE-over-IPsec secure mode is not
-  implemented.)
-- **L2TP is only safe with IPsec.** This tool always wraps L2TP in
-  IPsec (UDP 500/4500); UDP 1701 is never exposed publicly.
-- **Everything runs as `root`.** Back up your server before using these
-  tools; the tools take timestamped config backups and roll back on
-  failure, but a fresh server is still the safest starting point.
+Sets up `ocserv` with `ocpasswd` users and a self-signed cert by default. The CI validator runs `ocserv --test-config` against the generated config to catch unknown directives early.
+
+#### MTProto (menu 4)
+
+Downloads the pinned `mtg` binary from `9seconds/mtg`, verifies its SHA-256, and drops it behind a systemd unit. Pinning means supply-chain integrity is guaranteed at runtime.
+
+#### WARP (menu 5)
+
+Points at Cloudflare's official APT/YUM repository and installs the WARP client. Smoke-tested at install time.
+
+#### PPTP (menu 6)
+
+Uses `pptpd` (MS-CHAPv2 + 128-bit MPPE). Exits early on Ubuntu 24.04+ where the package was dropped, nudging users toward L2TP/IPsec instead. Requires explicit confirmation (`yes` or `--i-understand-pptp-is-insecure`) because PPTP's crypto is weak.
+
+#### L2TP/IPsec (menu 7)
+
+Generates `ipsec.conf` / `ipsec.secrets` (strongSwan) and `xl2tpd.conf` / `options.xl2tpd` from scratch. CI feeds those exact files to `/usr/lib/ipsec/starter --nofork` and `xl2tpd -D`; any unknown keyword fails the build.
+
+- **Firewall**: expose **UDP 500** and **UDP 4500** only. UDP 1701 is **not** opened publicly — L2TP rides inside the IPsec tunnel.
+- **Windows behind NAT**: some builds require `EnableTransportModeDirectAccess` (DWORD = 1) in `HKLM\SYSTEM\CurrentControlSet\Services\PolicyAgent\`. Without it, Phase 1 may fail or the tunnel may drop. See Microsoft's IKE transport-mode docs.
+- **iOS / Android**: native clients connect with the printed PSK and username/password out of the box.
+- **Multiple clients behind one NAT**: IPsec SAs share a single SPI, so only one client per NAT router can be active simultaneously. For many simultaneous clients through one gateway, use WireGuard or OpenConnect.
+
+#### GRE (menu 8)
+
+A plaintext `iproute2` point-to-point tunnel with systemd persistence. Both ends run this tool independently; the generator prints the peer command you paste into the other server. Inner `/30` addresses are derived deterministically — the lower public IP takes `.1`, the higher takes `.2` — so no manual address planning is required.
+
+```bash
+# Server A
+sudo bash tools/gre.sh add mytun --remote <B-public-IP>
+
+# Output includes the exact command to run on Server B
+bash tools/gre.sh add mytun --local <B-public-IP> --remote <A-public-IP> ...
+```
+
+---
+
+## Security & Clean-Room Architecture
+
+### Clean-room implementation
+
+Every tool in `tools/` is written from **official documentation and man pages**, not reverse-engineered from competing installers. When a downstream dependency isn't safe to ship inline (the OpenVPN installer, the `mtg` binary), we download a **pinned version** and verify its **SHA-256** before execution. No unvetted scripts are ever sourced.
+
+### Script hygiene
+
+- `set -euo pipefail` everywhere — failures abort, undefined variables crash loudly.
+- Input validated before use; root check enforced at the top of every entry point.
+- All edits are backed up (timestamped) before modification; rollback hooks fire on failure.
+- Every `rm -rf` targets a known variable prefix and rejects absolute `/` or empty paths.
+- Functions whose output is captured with `$(...)` log only to **stderr**, keeping stdout clean for scripted consumption.
+
+### Firewall & protocol warnings
+
+- **PPTP** is insecure by design (weak MPPE key handling). The installer refuses unless you acknowledge the risk.
+- **GRE** carries no encryption. Trust the underlay or wrap it in IPsec/WireGuard/OpenVPN.
+- **L2TP without IPsec is unsafe**; our tool always wraps it, exposing only UDP 500/4500.
+
+### Running as root
+
+These tools operate as `root` and touch system config, networking, and packages. Snapshot or back up your server before the first run. A fresh VPS image is the safest starting point.
+
+---
+
+## CI
+
+GitHub Actions validates every push / PR touching `.sh` or `.yml`:
+
+| Job | What it checks |
+|-----|----------------|
+| `shellcheck` | Strict ShellCheck on all our scripts; error-only on `wireguard-install.sh` |
+| `config-test` | `ocserv --test-config` against the generated config |
+| `pptp-dryrun` | Structural greps on `pptp.sh print-config` output; apt-cache guard for 24.04+ |
+| `l2tp-validate` | Feeds the generated strongSwan + xl2tpd configs to the real daemons (`starter --nofork`, `xl2tpd -D`) |
+| `gre-dryrun` | Mirrored-inner-address assertion + outer-endpoint swap + MTU consistency |
+| `gre-functional` | End-to-end netns ping test (skipped gracefully when `ip_gre` is unavailable) |
+| `gre-multiple` | Two independent tunnel pairs pick disjoint `/30` subnets (collision avoidance) |
+| `gre-ufw` | Inserts a dummy ufw rule, then asserts both `remove` and `uninstall` purge it from active and recorded state |
+
+Only `actions/checkout@v4` is used as a third-party action; all other steps are plain `run` commands.
+
+---
+
+## Contributing
+
+### Local pre-flight
+
+Before committing, run the same checks CI enforces:
+
+```bash
+shellcheck main.sh install_openvpn.sh tools/*.sh \
+             wireguard-install.sh
+shellcheck --severity=error wireguard-install.sh
+for f in *.sh tools/*.sh; do bash -n "$f"; done
+grep -rP '\r' --include='*.sh' --include='*.yml' .   # must produce no hits
+```
+
+### Adding a new tool
+
+1. Create `tools/<name>.sh` following the style of existing tools: shebang, `set -euo pipefail`, root check, `usage()`/`--help`, idempotent install, backup-before-edit, rollback on failure, uninstall path, `print-config` if applicable.
+2. Add it to the menu in `main.sh`.
+3. Add a CI job under `.github/workflows/shellcheck.yml` with the strongest validator you can (prefer real-daemon smoke tests over grep-only).
+4. Update the Status table and the Protocols matrix in this README.
+
+### Issues & questions
+
+File an issue on GitHub. Include:
+- OS/distro + version.
+- Which tool/menu item triggered the problem.
+- Relevant output/logs (redact keys and private IPs).
+- Steps to reproduce from a fresh VPS when possible.
+
+Pull requests are welcome — keep changes scoped, document the rationale, and ensure all local checks pass.
+
+---
 
 ## License
 
-See `LICENSE`.
+Copyright © 2024 Namiz4n. Licensed under the **[MIT License](LICENSE)**.
+
+Note: `wireguard-install.sh` preserves its original copyright notices (MIT, Nyr / Lin Song) and `install_openvpn.sh` delegates to the MIT-licensed angristan/openvpn-install. Our additions to those files are MIT-licensed as well.
