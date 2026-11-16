@@ -388,3 +388,70 @@ jobs:
           done
           echo "GRE multiple-tunnel test PASSED: no address collisions."
           rm -rf "$D1" "$D2"
+
+  gre-ufw:
+    name: GRE ufw rule removal (remove + uninstall)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install ufw for test harness
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ufw
+
+      - name: Add a dummy UFW rule to emulate gre.sh's allow, then remove it
+        run: |
+          set -uo pipefail
+          REMOTE="203.0.113.9"
+          CONF_DIR="$(mktemp -d)"
+          trap 'rm -rf "$CONF_DIR"' EXIT
+          # Create a fake tunnel config so remove_tunnel can read saved_remote.
+          printf 'NAME=gre0\nREMOTE_IP=%s\nLOCAL_INNER=10.10.0.1\n' "$REMOTE" \
+              > "$CONF_DIR/gre0.conf"
+          export GRE_CONF_DIR="$CONF_DIR"
+          # Populate ufw state as if the installer had added its rule.
+          # "ufw delete" only accepts rules present in `ufw show added`; on
+          # an inactive firewall those entries are stale and harmless.
+          sudo ufw --force insert 2 "allow in proto gre from $REMOTE any" \
+              >/dev/null 2>&1 || true
+          grep -qE "from $REMOTE.*any" <<< "$(sudo ufw status verbose)" \
+              || { echo "::error::initial rule not present"; exit 1; }
+          bash tools/gre.sh remove gre0 >/tmp/remove-gre.log 2>&1
+          removed=$(grep -c 'UFW: manually remove' /tmp/remove-gre.log || true)
+          [[ "${removed:-0}" -eq 0 ]] \
+              || { echo "::error::remove left the old manual-cleanup warning"; exit 1; }
+          # The rule must be gone from both runtime and recorded state.
+          sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
+              && { echo "::error::ufw rule still active after remove"; exit 1; }
+          sudo ufw show added | grep -qE "from $REMOTE.*any" \
+              && { echo "::error::ufw recorded rule still present after remove"; exit 1; }
+          echo "GRE remove: ufw rule cleaned up successfully."
+
+      - name: Verify uninstall also purges the dummy rule
+        run: |
+          set -uo pipefail
+          REMOTE="203.0.113.10"
+          CONF_DIR="$(mktemp -d)"
+          trap 'rm -rf "$CONF_DIR"' EXIT
+          mkdir -p "$CONF_DIR"
+          for i in gre0 gre1; do
+            printf 'NAME=%s\nREMOTE_IP=%s\nLOCAL_INNER=10.10.%s.1\n' \
+                "$i" "$REMOTE" "$((i == "gre0" ? 0 : 1))" \
+                > "$CONF_DIR/${i}.conf"
+          done
+          export GRE_CONF_DIR="$CONF_DIR"
+          sudo ufw --force insert 2 "allow in proto gre from $REMOTE any" \
+              >/dev/null 2>&1 || true
+          grep -qE "from $REMOTE.*any" <<< "$(sudo ufw status verbose)" \
+              || { echo "::error::initial rule not present before uninstall"; exit 1; }
+          bash tools/gre.sh uninstall >/tmp/uninstall-gre.log 2>&1
+          uninstalled=$(grep -c 'UFW: manually remove' /tmp/uninstall-gre.log || true)
+          [[ "${uninstalled:-0}" -eq 0 ]] \
+              || { echo "::error::uninstall left the old manual-cleanup warning"; exit 1; }
+          sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
+              && { echo "::error::ufw rule still active after uninstall"; exit 1; }
+          sudo ufw show added | grep -qE "from $REMOTE.*any" \
+              && { echo "::error::ufw recorded rule still present after uninstall"; exit 1; }
+          echo "GRE uninstall: ufw rule cleaned up successfully."

@@ -520,9 +520,8 @@ remove_tunnel() {
     fw="$(detect_firewall)"
     case "$fw" in
         ufw)
-            # ufw does not support deleting by-rule-content for raw-protocol
-            # rules added via `ufw allow in proto …`; best-effort removal
-            # is left to the uninstall path (which wipes everything).
+            ufw delete allow in proto gre from "${saved_remote}" any \
+                >>/dev/null 2>&1 || true
             ;;
         firewalld)
             firewall-cmd --permanent --remove-rich-rule="rule protocol value=\"gre\" source address=\"${saved_remote}\" accept" >/dev/null 2>&1 || true
@@ -667,9 +666,8 @@ uninstall() {
     iface="$(default_iface)"
     case "$fw" in
         ufw)
-            # ufw cannot enumerate/delete individual raw-protocol rules;
-            # document that manual cleanup may be needed.
-            warn "UFW: manually remove GRE (proto 47) rules if needed."
+            ufw delete allow in proto gre from "$REMOTE_IP" any \
+                >>/dev/null 2>&1 || true
             ;;
         firewalld)
             # Remove any rich rule matching our tag pattern.

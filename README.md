@@ -10,7 +10,7 @@ or Ubuntu system.
 | Part | CI coverage | Real-VPS notes |
 |------|-------------|----------------|
 | OpenVPN (`install_openvpn.sh`) | ShellCheck strict | Upstream installer; tested manually. |
-| WireGuard (`wireguard-install.sh`) | ShellCheck error-only | Updated repo URL comment; otherwise unchanged. |
+| WireGuard (`wireguard-install.sh`) | ShellCheck error-only | Switched public-IP detection from `http://` to `https://`; embedded sysctl tuning file directly in-tree instead of downloading from hwdsl2/vpn-extras (no external network dependency). Copyright/license header left untouched. |
 | OpenConnect (`tools/ocserv.sh`) | ShellCheck + `ocserv --test-config` | Verified in CI. |
 | MTProto (`tools/mtproto.sh`) | ShellCheck strict | Binary pinned; SHA-256 verified at install time. |
 | WARP (`tools/warp.sh`) | ShellCheck strict | Cloudflare official repo; install-time smoke tested. |

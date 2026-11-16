@@ -22,7 +22,7 @@ REF="ad22fd9eb0c8569a885f836ef6e37576d8702e9f"
 
 # Optional: set to the expected SHA-256 of the downloaded installer to
 # verify integrity before executing it. Leave empty to skip verification.
-EXPECTED_SHA256=""
+EXPECTED_SHA256="f10e139ee7f7a52fc022208c1c9ac110093605bddbe7e3fa19897d1af0c77c51"
 
 UPSTREAM_URL="https://raw.githubusercontent.com/angristan/openvpn-install/${REF}/openvpn-install.sh"
 

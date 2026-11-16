@@ -32,7 +32,7 @@ NC='\033[0m'
 
 WARP_BIN="warp-cli"
 WARP_SERVICE="warp-svc"
-CONFIGURED_MARKER="/etc/warp/.vpn-install-configured"
+CONFIGURED_MARKER="/etc/warp/.vpnbox-configured"
 KEYRING="/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg"
 
 AUTO=0

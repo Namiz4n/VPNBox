@@ -433,8 +433,8 @@ check_dns_or_ip() {
 }
 
 find_public_ip() {
-	ip_url1="http://ipv4.icanhazip.com"
-	ip_url2="http://ip1.dynupdate.no-ip.com"
+	ip_url1="https://ipv4.icanhazip.com"
+	ip_url2="https://ip1.dynupdate.no-ip.com"
 	get_public_ip=$(grep -m 1 -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' <<< "$(wget -T 10 -t 1 -4qO- "$ip_url1" || curl -m 10 -4Ls "$ip_url1")")
 	if ! check_ip "$get_public_ip"; then
 		get_public_ip=$(grep -m 1 -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' <<< "$(wget -T 10 -t 1 -4qO- "$ip_url2" || curl -m 10 -4Ls "$ip_url2")")
@@ -968,12 +968,17 @@ update_sysctl() {
 	if [[ -n "$ip6" ]]; then
 		echo "net.ipv6.conf.all.forwarding=1" >> "$conf_fwd"
 	fi
-	base_url="https://github.com/hwdsl2/vpn-extras/releases/download/v1.0.0"
-	conf_url="$base_url/sysctl-wg-$os"
-	[ "$auto" != 0 ] && conf_url="${conf_url}-auto"
-	wget -t 3 -T 30 -q -O "$conf_opt" "$conf_url" 2>/dev/null \
-		|| curl -m 30 -fsL "$conf_url" -o "$conf_opt" 2>/dev/null \
-		|| { /bin/rm -f "$conf_opt"; touch "$conf_opt"; }
+	# Optimizations: derived from Linux kernel docs (TCP buffer auto-tuning,
+	# BBR congestion control, msg-buffer caps) and WireGuard networking notes.
+	# No external download — kept in-tree to avoid checksum/availability risk.
+	cat > "$conf_opt" <<'EOF'
+kernel.msgmnb = 65536
+kernel.msgmax = 65536
+net.core.wmem_max = 16777216
+net.core.rmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 87380 16777216
+EOF
 	if modprobe -q tcp_bbr \
 		&& printf '%s\n%s' "4.20" "$(uname -r)" | sort -C -V \
 		&& [ -f /proc/sys/net/ipv4/tcp_congestion_control ]; then

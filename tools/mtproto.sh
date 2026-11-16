@@ -57,7 +57,7 @@ CONFIG="/etc/mtg.toml"
 SECRETS="/etc/mtg/secrets"          # one line per secret (hex), chmod 600
 SECRETS_DIR="$(dirname "$SECRETS")"
 SERVICE="mtg"
-CONFIGURED_MARKER="${SECRETS_DIR}/.vpn-install-configured"
+CONFIGURED_MARKER="${SECRETS_DIR}/.vpnbox-configured"
 DEFAULT_PORT=443
 
 # SHA-256 checksums for the two Linux release assets (from the v2.3.0
