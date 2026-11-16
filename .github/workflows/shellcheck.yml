@@ -440,7 +440,9 @@ jobs:
           # Run the tool's remove path. Must NOT emit the old "manually
           # remove GRE rules" advisory (that comment was removed from the
           # script in this PR — keep the assertion there to catch regressions).
-          sudo bash tools/gre.sh remove gre0 >/tmp/remove-gre.log 2>&1
+          # `sudo` resets the environment; prefix so gre.sh sees CONF_DIR.
+          GRE_CONF_DIR="$CONF_DIR" sudo bash tools/gre.sh remove gre0 \
+              >/tmp/remove-gre.log 2>&1
           echo "--- gre.sh remove log ---"
           cat /tmp/remove-gre.log || true
           grep -q 'UFW: manually remove' /tmp/remove-gre.log \
@@ -473,7 +475,9 @@ jobs:
           sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
               || { echo "::error::rule missing before uninstall"; exit 1; }
           echo "Running uninstall…"
-          sudo bash tools/gre.sh uninstall >/tmp/uninstall-gre.log 2>&1
+          # `sudo` resets the environment; prefix so gre.sh sees CONF_DIR.
+          GRE_CONF_DIR="$CONF_DIR" sudo bash tools/gre.sh uninstall \
+              >/tmp/uninstall-gre.log 2>&1
           echo "--- gre.sh uninstall log ---"
           cat /tmp/uninstall-gre.log || true
           grep -q 'UFW: manually remove' /tmp/uninstall-gre.log \
