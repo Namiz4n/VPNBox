@@ -427,7 +427,8 @@ jobs:
           # Use `insert` at position 2 so it lands right after the default
           # allow-out rule but above the deny-in catch-all — a realistic
           # placement that also exercises the numbered-index path of ufw.
-          sudo ufw --force insert 2 "allow in proto 47 from $REMOTE any"
+          # `ufw insert` accepts no `--force` flag; bare insertion works on an enabled firewall.
+          sudo ufw insert 2 "allow in proto 47 from $REMOTE any"
           echo "--- ufw status after insert ---"
           sudo ufw status verbose
           # Sanity: it should show up in both the applied table and persistent
@@ -469,7 +470,8 @@ jobs:
           printf 'NAME=gre1\nREMOTE_IP=%s\nLOCAL_INNER=10.10.1.1\n' "$REMOTE" \
               > "$CONF_DIR/gre1.conf"
           export GRE_CONF_DIR="$CONF_DIR"
-          sudo ufw --force insert 2 "allow in proto 47 from $REMOTE any"
+          # `ufw insert` accepts no `--force` flag; bare insertion works on an enabled firewall.
+          sudo ufw insert 2 "allow in proto 47 from $REMOTE any"
           echo "--- ufw status before uninstall ---"
           sudo ufw status verbose
           sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
