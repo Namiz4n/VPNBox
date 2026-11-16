@@ -520,7 +520,7 @@ remove_tunnel() {
     fw="$(detect_firewall)"
     case "$fw" in
         ufw)
-            ufw delete allow in proto gre from "${saved_remote}" any \
+            ufw delete allow in proto 47 from "${saved_remote}" any \
                 >>/dev/null 2>&1 || true
             ;;
         firewalld)
@@ -666,7 +666,7 @@ uninstall() {
     iface="$(default_iface)"
     case "$fw" in
         ufw)
-            ufw delete allow in proto gre from "$REMOTE_IP" any \
+            ufw delete allow in proto 47 from "$REMOTE_IP" any \
                 >>/dev/null 2>&1 || true
             ;;
         firewalld)
