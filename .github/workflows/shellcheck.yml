@@ -398,14 +398,20 @@ jobs:
 
       - name: Install + bootstrap ufw for test harness
         run: |
+          set -eo pipefail
           sudo apt-get update
           sudo apt-get install -y ufw
-          # On runners ufw ships disabled — reset clears residual state,
-          # enable makes the runtime table visible so assertions land.
+          # Reset is required because GitHub Actions caches `/etc/ufw`
+          # between jobs; `enable` makes the runtime table visible so
+          # status/addes inspections land on actual state, not just
+          # persisted rules that never got loaded.
           sudo ufw --force reset
           sudo ufw default deny incoming
           sudo ufw default allow outgoing
           sudo ufw --force enable
+          # Diagnostic: confirm the firewall is actually active before testing.
+          sudo ufw status verbose | head -5
+          echo "ufw bootstrapped OK."
 
       - name: Assert ufw remove drains the dummy proto-gre rule
         run: |
@@ -418,19 +424,29 @@ jobs:
               > "$CONF_DIR/gre0.conf"
           export GRE_CONF_DIR="$CONF_DIR"
           # Insert exactly the rule gre.sh's allow_gre_firewall emits.
+          # Use `insert` at position 2 so it lands right after the default
+          # allow-out rule but above the deny-in catch-all — a realistic
+          # placement that also exercises the numbered-index path of ufw.
           sudo ufw --force insert 2 "allow in proto 47 from $REMOTE any"
+          echo "--- ufw status after insert ---"
+          sudo ufw status verbose
           # Sanity: it should show up in both the applied table and persistent
           # records (ufw --force enables the new rule immediately).
           sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
               || { echo "::error::rule missing from ufw status verbose"; exit 1; }
           sudo ufw show added | grep -qE "from $REMOTE.*any" \
               || { echo "::error::rule missing from ufw show added"; exit 1; }
+          echo "Rule inserted; running remove…"
           # Run the tool's remove path. Must NOT emit the old "manually
           # remove GRE rules" advisory (that comment was removed from the
           # script in this PR — keep the assertion there to catch regressions).
           sudo bash tools/gre.sh remove gre0 >/tmp/remove-gre.log 2>&1
+          echo "--- gre.sh remove log ---"
+          cat /tmp/remove-gre.log || true
           grep -q 'UFW: manually remove' /tmp/remove-gre.log \
               && { echo "::error::remove still prints manual-cleanup warning"; exit 1; }
+          echo "--- ufw status after remove ---"
+          sudo ufw status verbose
           # Both active and recorded state must be clear now.
           sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
               && { echo "::error::ufw rule still active after remove"; exit 1; }
@@ -452,11 +468,18 @@ jobs:
               > "$CONF_DIR/gre1.conf"
           export GRE_CONF_DIR="$CONF_DIR"
           sudo ufw --force insert 2 "allow in proto 47 from $REMOTE any"
+          echo "--- ufw status before uninstall ---"
+          sudo ufw status verbose
           sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
               || { echo "::error::rule missing before uninstall"; exit 1; }
+          echo "Running uninstall…"
           sudo bash tools/gre.sh uninstall >/tmp/uninstall-gre.log 2>&1
+          echo "--- gre.sh uninstall log ---"
+          cat /tmp/uninstall-gre.log || true
           grep -q 'UFW: manually remove' /tmp/uninstall-gre.log \
               && { echo "::error::uninstall still prints manual-cleanup warning"; exit 1; }
+          echo "--- ufw status after uninstall ---"
+          sudo ufw status verbose
           sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
               && { echo "::error::ufw rule still active after uninstall"; exit 1; }
           sudo ufw show added | grep -qE "from $REMOTE.*any" \
