@@ -418,14 +418,14 @@ jobs:
           set -eo pipefail
           REMOTE="203.0.113.9"
           CONF_DIR="/etc/gre-tunnels"
-          # gre.sh defaults to this dir (no GRE_CONF_DIR override needed;
+          # gre.sh defaults to this dir (noGRE_CONF_DIR override needed;
           # avoid the old mistake of trying to pass it through sudo, which
           # resets the environment by default and makes the variable vanish).
           # Place a single fake config file so remove_tunnel() finds one.
-          mkdir -p "$CONF_DIR"
+          sudo mkdir -p "$CONF_DIR"
           printf 'NAME=gre0\nREMOTE_IP=%s\nLOCAL_INNER=10.10.0.1\n' "$REMOTE" \
-              > "$CONF_DIR/gre0.conf"
-          trap 'rm -f "$CONF_DIR"/gre0.conf; rmdir "$CONF_DIR" 2>/dev/null || true' EXIT
+              | sudo tee "$CONF_DIR/gre0.conf" >/dev/null
+          trap 'sudo rm -f "$CONF_DIR"/gre0.conf; sudo rmdir "$CONF_DIR" 2>/dev/null || true' EXIT
           # Insert exactly the rule gre.sh's allow_gre_firewall emits.
           # Position 2 places it right after the default allow-out rule,
           # above the deny-in catch-all — a realistic placement.
@@ -463,12 +463,12 @@ jobs:
           CONF_DIR="/etc/gre-tunnels"
           # Two fake tunnels so uninstall iterates twice; the fw branch
           # only walks CONF_DIR/*.conf anyway — same dir as above.
-          mkdir -p "$CONF_DIR"
+          sudo mkdir -p "$CONF_DIR"
           printf 'NAME=gre0\nREMOTE_IP=%s\nLOCAL_INNER=10.10.0.1\n' "$REMOTE" \
-              > "$CONF_DIR/gre0.conf"
+              | sudo tee "$CONF_DIR/gre0.conf" >/dev/null
           printf 'NAME=gre1\nREMOTE_IP=%s\nLOCAL_INNER=10.10.1.1\n' "$REMOTE" \
-              > "$CONF_DIR/gre1.conf"
-          trap 'rm -f "$CONF_DIR"/*.conf; rmdir "$CONF_DIR" 2>/dev/null || true' EXIT
+              | sudo tee "$CONF_DIR/gre1.conf" >/dev/null
+          trap 'sudo rm -f "$CONF_DIR"/*.conf; sudo rmdir "$CONF_DIR" 2>/dev/null || true' EXIT
           # `ufw insert` does not take `--force`; bare insertion is fine on
           # an already-enabled firewall.
           sudo ufw insert 2 "allow in proto 47 from $REMOTE any"
