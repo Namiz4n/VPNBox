@@ -460,49 +460,53 @@ jobs:
         run: |
           set -eo pipefail
           REMOTE="203.0.113.9"
+          GWS="$GITHUB_WORKSPACE"
           sudo ip link del gre0 2>/dev/null || true   # ensure clean slate
-          sudo REMOTE="$REMOTE" bash -c "
+          # Write the test harness to a temp file on the runner so sudo bash can
+          # source it cleanly without having to dodge bash -c quoting layers.
+          cat > /tmp/_gre_ufw_test.sh <<'INNER'
+            #!/usr/bin/env bash
             set -eo pipefail
-            REMOTE_IP='$REMOTE'
-            source '$GITHUB_WORKSPACE/tools/gre.sh'
-            echo '[test] REMOTE_IP=\$REMOTE_IP'
+            REMOTE="${1:-203.0.113.9}"
+            GWS="${2:-.}"
+            REMOTE_IP="$REMOTE"
+            source "${GWS}/tools/gre.sh"
+            echo "[test] REMOTE_IP=$REMOTE_IP"
             # --- Add: fire the exact function the real tool uses for the ufw path ---
             allow_gre_firewall
-            echo '[test] add done'
-            ufw_status='\$(sudo ufw status verbose 2>/dev/null || true)'
-            ufw_added='\$(sudo ufw show added 2>/dev/null || true)'
-            echo '--- ufw status verbose ---'
-            echo '\$ufw_status'
-            echo '--- ufw show added ---'
-            echo '\$ufw_added'
-            if ! echo \"\$ufw_status\" | grep -qi 'proto gre'; then
-              echo '::error::proto-gre rule not present in ufw after add'
+            echo "[test] add done"
+            ufw_status="$(sudo ufw status verbose 2>/dev/null || true)"
+            ufw_added="$(sudo ufw show added 2>/dev/null || true)"
+            echo "--- ufw status verbose ---"
+            echo "$ufw_status"
+            echo "--- ufw show added ---"
+            echo "$ufw_added"
+            if ! echo "$ufw_status" | grep -qi 'proto gre'; then
+              echo "::error::proto-gre rule not present in ufw after add"
               exit 1
             fi
-            echo '[test] add verified: proto gre rule present'
-            # --- Remove: fire the same function remove_tunnel uses for its ufw branch ---
-            # save_remote is empty here because no config was written; ufw delete with an
-            # empty src is fine — it fails harmlessly under || true. Re-set it so delete
-            # targets the right peer IP instead.
-            REMOTE_IP='$REMOTE'
-            ufw delete allow in proto gre from '\$REMOTE_IP' 2>&1 || true
-            echo '[test] remove done'
-            ufw_after='\$(sudo ufw status verbose 2>/dev/null || true)'
-            added_after='\$(sudo ufw show added 2>/dev/null || true)'
-            echo '--- ufw status verbose after remove ---'
-            echo '\$ufw_after'
-            echo '--- ufw show added after remove ---'
-            echo '\$added_after'
-            if echo \"\$ufw_after\" | grep -qE 'proto gre'; then
-              echo '::error::ufw rule still present after remove'
+            echo "[test] add verified: proto gre rule present"
+            # --- Remove: fire the same ufw-delete path remove_tunnel takes ---
+            ufw delete allow in proto gre from "$REMOTE_IP" 2>&1 || true
+            echo "[test] remove done"
+            ufw_after="$(sudo ufw status verbose 2>/dev/null || true)"
+            added_after="$(sudo ufw show added 2>/dev/null || true)"
+            echo "--- ufw status verbose after remove ---"
+            echo "$ufw_after"
+            echo "--- ufw show added after remove ---"
+            echo "$added_after"
+            if echo "$ufw_after" | grep -qE 'proto gre'; then
+              echo "::error::ufw rule still present after remove"
               exit 1
             fi
-            if echo \"\$added_after\" | grep -qE 'proto gre'; then
-              echo '::error::ufw recorded rule still present after remove'
+            if echo "$added_after" | grep -qE 'proto gre'; then
+              echo "::error::ufw recorded rule still present after remove"
               exit 1
             fi
-            echo '[test] GRE ufw rule add/remove PASSED'
-          "
+            echo "[test] GRE ufw rule add/remove PASSED"
+          INNER
+          chmod +x /tmp/_gre_ufw_test.sh
+          sudo REMOTE="$REMOTE" bash /tmp/_gre_ufw_test.sh "$REMOTE" "$GWS"
       - name: Clean up gre state after test
         if: always()
         run: |
