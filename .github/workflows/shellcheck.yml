@@ -425,13 +425,14 @@ jobs:
                  GRE_UNIT_DIR="$TEST_STATE/units" \
                  SYSCTL="$TEST_STATE/sysctl.conf" \
                  MODULES="$TEST_STATE/modules-load.d"
-          # gre.sh guards its main; sourcing is safe because all helpers
-          # are regular functions and won't fire the CLI case statement.
-          source tools/gre.sh
-          # Call the firewall helper with sudo because ufw operations are
-          # privileged; match exactly the command shape gre.sh emits today.
-          REMOTE_IP="$REMOTE"
-          sudo allow_gre_firewall
+          # Run the whole helper invocation under sudo so that both the
+          # sourced functions AND the ufw commands they call run with
+          # root privileges in a single process.
+          sudo bash -c '
+            REMOTE_IP="'"$REMOTE"'"
+            source tools/gre.sh
+            allow_gre_firewall
+          '
           echo "--- ufw status after add ---"
           sudo ufw status verbose
           sudo ufw status numbered
@@ -452,11 +453,8 @@ jobs:
                  GRE_UNIT_DIR="$TEST_STATE/units" \
                  SYSCTL="$TEST_STATE/sysctl.conf" \
                  MODULES="$TEST_STATE/modules-load.d"
-          source tools/gre.sh
-          # remove_tunnel requires root because it tears down interfaces /
-          # systemd units; we pass a dummy name — the ufw branch runs even
-          # if no .conf file exists and falls back gracefully.
-          sudo REMOTE_IP="$REMOTE" bash -c '
+          sudo bash -c '
+            REMOTE_IP="'"$REMOTE"'"
             source tools/gre.sh
             remove_tunnel "gre0" >/tmp/remove-gre.log 2>&1 || true
           '
