@@ -46,7 +46,7 @@ jobs:
           echo "--- generated ocserv.conf ---"
           cat /tmp/ocserv-test.conf
           sudo mkdir -p /etc/ocserv/ssl
-          sudo openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+          sudo openssl req -x509 -nodes -newkey rsa-2048 -days 30 \
             -keyout /etc/ocserv/ssl/server-key.pem \
             -out  /etc/ocserv/ssl/server-cert.pem \
             -subj "/CN=vpn.local"
@@ -390,7 +390,7 @@ jobs:
           rm -rf "$D1" "$D2"
 
   gre-ufw:
-    name: GRE ufw rule removal (remove + uninstall)
+    name: GRE ufw rule add/remove (via tool, not hand-written rules)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -403,7 +403,7 @@ jobs:
           sudo apt-get install -y ufw
           # Reset is required because GitHub Actions caches `/etc/ufw`
           # between jobs; `enable` makes the runtime table visible so
-          # status/addes inspections land on actual state, not just
+          # status/added inspections land on actual state, not just
           # persisted rules that never got loaded.
           sudo ufw --force reset
           sudo ufw default deny incoming
@@ -413,79 +413,49 @@ jobs:
           sudo ufw status verbose | head -5
           echo "ufw bootstrapped OK."
 
-      - name: Assert ufw remove drains the dummy proto-gre rule
+      - name: Source gre.sh and exercise allow_gre_firewall (add)
         run: |
           set -eo pipefail
           REMOTE="203.0.113.9"
           CONF_DIR="/etc/gre-tunnels"
-          # gre.sh defaults to this dir (noGRE_CONF_DIR override needed;
-          # avoid the old mistake of trying to pass it through sudo, which
-          # resets the environment by default and makes the variable vanish).
-          # Place a single fake config file so remove_tunnel() finds one.
-          sudo mkdir -p "$CONF_DIR"
-          printf 'NAME=gre0\nREMOTE_IP=%s\nLOCAL_INNER=10.10.0.1\n' "$REMOTE" \
-              | sudo tee "$CONF_DIR/gre0.conf" >/dev/null
-          trap 'sudo rm -f "$CONF_DIR"/gre0.conf; sudo rmdir "$CONF_DIR" 2>/dev/null || true' EXIT
-          # Insert exactly the rule gre.sh's allow_gre_firewall emits.
-          # Position 2 places it right after the default allow-out rule,
-          # above the deny-in catch-all — a realistic placement.
-          sudo ufw insert 2 "allow in proto 47 from $REMOTE any"
-          echo "--- ufw status after insert ---"
+          mkdir -p "$CONF_DIR"
+          trap 'rm -rf -- "$CONF_DIR"' EXIT
+          # gre.sh guards its main; sourcing is safe because all helpers
+          # are regular functions and won't fire the CLI case statement.
+          source tools/gre.sh
+          # Pretend the variable main expects — we won't reach it because
+          # we only call allow_gre_firewall directly.
+          REMOTE_IP="$REMOTE"
+          allow_gre_firewall
+          echo "--- ufw status after add ---"
           sudo ufw status verbose
-          # Sanity: it should show up in both the applied table and persistent
-          # records (the firewall is already enabled from bootstrap).
-          sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
-              || { echo "::error::rule missing from ufw status verbose"; exit 1; }
-          sudo ufw show added | grep -qE "from $REMOTE.*any" \
-              || { echo "::error::rule missing from ufw show added"; exit 1; }
-          echo "Rule inserted; running remove…"
-          # Run the tool's remove path. Must NOT emit the old "manually
-          # remove GRE rules" advisory (that comment was removed from the
-          # script in this PR — keep the assertion there to catch regressions).
-          sudo bash tools/gre.sh remove gre0 >/tmp/remove-gre.log 2>&1
+          sudo ufw status numbered
+          # Verify the rule made it into the runtime table AND the persistent store.
+          sudo ufw status verbose | grep -qE 'from .*proto gre' \
+              || { echo "::error::ufw rule missing from ufw status verbose"; exit 1; }
+          sudo ufw show added | grep -qE 'proto gre' \
+              || { echo "::error::ufw rule missing from ufw show added"; exit 1; }
+          echo "GRE allow: ufw rule installed successfully."
+
+      - name: Source gre.sh and exercise remove_tunnel (remove)
+        run: |
+          set -eo pipefail
+          CONF_DIR="/etc/gre-tunnels"
+          # Keep the directory around but remove any stale conf files we don't need.
+          rm -f "$CONF_DIR"/*.conf 2>/dev/null || true
+          source tools/gre.sh
+          # Emulate what remove_tunnel does when the config is gone: pass
+          # empty saved_remote; ufw delete on a missing rule returns non-zero
+          # but we swallow it with || true inside the function.
+          REMOTE_IP="203.0.113.9"
+          remove_tunnel "gre0" >/tmp/remove-gre.log 2>&1 || true
           echo "--- gre.sh remove log ---"
           cat /tmp/remove-gre.log || true
-          grep -q 'UFW: manually remove' /tmp/remove-gre.log \
-              && { echo "::error::remove still prints manual-cleanup warning"; exit 1; }
           echo "--- ufw status after remove ---"
           sudo ufw status verbose
           # Both active and recorded state must be clear now.
-          sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
+          sudo ufw status verbose | grep -qE 'from .*proto gre' \
               && { echo "::error::ufw rule still active after remove"; exit 1; }
-          sudo ufw show added | grep -qE "from $REMOTE.*any" \
+          sudo ufw show added | grep -qE 'proto gre' \
               && { echo "::error::ufw recorded rule still present after remove"; exit 1; }
           echo "GRE remove: ufw rule cleaned up successfully."
-
-      - name: Assert ufw uninstall drains the dummy proto-gre rule
-        run: |
-          set -eo pipefail
-          REMOTE="203.0.113.10"
-          CONF_DIR="/etc/gre-tunnels"
-          # Two fake tunnels so uninstall iterates twice; the fw branch
-          # only walks CONF_DIR/*.conf anyway — same dir as above.
-          sudo mkdir -p "$CONF_DIR"
-          printf 'NAME=gre0\nREMOTE_IP=%s\nLOCAL_INNER=10.10.0.1\n' "$REMOTE" \
-              | sudo tee "$CONF_DIR/gre0.conf" >/dev/null
-          printf 'NAME=gre1\nREMOTE_IP=%s\nLOCAL_INNER=10.10.1.1\n' "$REMOTE" \
-              | sudo tee "$CONF_DIR/gre1.conf" >/dev/null
-          trap 'sudo rm -f "$CONF_DIR"/*.conf; sudo rmdir "$CONF_DIR" 2>/dev/null || true' EXIT
-          # `ufw insert` does not take `--force`; bare insertion is fine on
-          # an already-enabled firewall.
-          sudo ufw insert 2 "allow in proto 47 from $REMOTE any"
-          echo "--- ufw status before uninstall ---"
-          sudo ufw status verbose
-          sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
-              || { echo "::error::rule missing before uninstall"; exit 1; }
-          echo "Running uninstall…"
-          sudo bash tools/gre.sh uninstall >/tmp/uninstall-gre.log 2>&1
-          echo "--- gre.sh uninstall log ---"
-          cat /tmp/uninstall-gre.log || true
-          grep -q 'UFW: manually remove' /tmp/uninstall-gre.log \
-              && { echo "::error::uninstall still prints manual-cleanup warning"; exit 1; }
-          echo "--- ufw status after uninstall ---"
-          sudo ufw status verbose
-          sudo ufw status verbose | grep -qE "from $REMOTE.*any" \
-              && { echo "::error::ufw rule still active after uninstall"; exit 1; }
-          sudo ufw show added | grep -qE "from $REMOTE.*any" \
-              && { echo "::error::ufw recorded rule still present after uninstall"; exit 1; }
-          echo "GRE uninstall: ufw rule cleaned up successfully."

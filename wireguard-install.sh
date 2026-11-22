@@ -968,14 +968,17 @@ update_sysctl() {
 	if [[ -n "$ip6" ]]; then
 		echo "net.ipv6.conf.all.forwarding=1" >> "$conf_fwd"
 	fi
-	# Optimizations: derived from Linux kernel docs (TCP buffer auto-tuning,
-	# BBR congestion control, msg-buffer caps) and WireGuard networking notes.
-	# No external download — kept in-tree to avoid checksum/availability risk.
+	# UDP-optimized tunables for a WireGuard tunnel on Debian/Ubuntu.
+	# Values chosen for a typical VPS (1 Gbps LAN, <1 ms RTT):
+	#   BDPR ~ 1 GiB/s * 1 ms = 125 KiB per direction; round up to 16 MiB
+	#   for headroom under bursty traffic and kernel overhead.
+	# TCP rmem/wmem keep existing connections happy when userspace mixes
+	# VPN + web traffic over the same NIC.  No need to touch SysV message
+	# queues (msgmnb/msgmax) — they are unrelated to network I/O.
+	# No external download — in-tree avoids checksum/availability risk.
 	cat > "$conf_opt" <<'EOF'
-kernel.msgmnb = 65536
-kernel.msgmax = 65536
-net.core.wmem_max = 16777216
 net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
 net.ipv4.tcp_rmem = 4096 87380 16777216
 net.ipv4.tcp_wmem = 4096 87380 16777216
 EOF

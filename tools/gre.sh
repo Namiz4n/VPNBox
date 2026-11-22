@@ -457,21 +457,28 @@ allow_gre_firewall() {
     fw="$(detect_firewall)"
     case "$fw" in
         ufw)
-            ufw allow in proto 47 from "$REMOTE_IP" any >>/dev/null 2>&1 \
-                || warn "ufw: could not allow GRE from $REMOTE_IP"
+            # ufw rejects bare numeric protocols on some releases; use the
+            # human-readable name "gre". The trailing "any" is also rejected.
+            local _ufw_out
+            _ufw_out="$(ufw allow in proto gre from "$REMOTE_IP" 2>&1)" || true
+            if echo "$_ufw_out" | grep -q '^Rule added'; then
+                log "ufw: allowed GRE from $REMOTE_IP."
+            else
+                warn "ufw: could not allow GRE from $REMOTE_IP ($_ufw_out)"
+            fi
             ;;
         firewalld)
-            firewall-cmd --permanent --add-rich-rule="rule protocol value=\"gre\" source address=\"$REMOTE_IP\" accept" >/dev/null 2>&1 \
-                || warn "firewalld: could not allow GRE from $REMOTE_IP"
-            firewall-cmd --reload >/dev/null 2>&1 || true
+            firewall-cmd --permanent --add-rich-rule="rule protocol value=\"gre\" source address=\"$REMOTE_IP\" accept" \
+                2>&1 || warn "firewalld: could not allow GRE from $REMOTE_IP"
+            firewall-cmd --reload 2>&1 || true
             ;;
         iptables)
-            iptables -C INPUT -p 47 -s "$REMOTE_IP" -j ACCEPT 2>/dev/null \
-                || iptables -A INPUT -p 47 -s "$REMOTE_IP" -j ACCEPT
+            iptables -C INPUT -p gre -s "$REMOTE_IP" -j ACCEPT 2>&1 \
+                || iptables -A INPUT -p gre -s "$REMOTE_IP" -j ACCEPT
             ;;
         none)
             warn "No active firewall detected. GRE is not encrypted; only allow"
-            warn "IP protocol 47 from your peer's IP ($REMOTE_IP) in the cloud"
+            warn "IP protocol gre from your peer's IP ($REMOTE_IP) in the cloud"
             warn "security group."
             ;;
     esac
@@ -520,15 +527,19 @@ remove_tunnel() {
     fw="$(detect_firewall)"
     case "$fw" in
         ufw)
-            ufw delete allow in proto 47 from "${saved_remote}" any \
-                >>/dev/null 2>&1 || true
+            # Match the same command shape used when adding the rule so
+            # `ufw delete` finds it without ambiguity about which rule to
+            # remove (u32 vs explicit-protocol).
+            ufw delete allow in proto gre from "${saved_remote}" 2>&1 \
+                || true
             ;;
         firewalld)
-            firewall-cmd --permanent --remove-rich-rule="rule protocol value=\"gre\" source address=\"${saved_remote}\" accept" >/dev/null 2>&1 || true
-            firewall-cmd --reload >/dev/null 2>&1 || true
+            firewall-cmd --permanent --remove-rich-rule="rule protocol value=\"gre\" source address=\"${saved_remote}\" accept" 2>&1 || true
+            firewall-cmd --reload 2>&1 || true
             ;;
         iptables)
-            iptables -D INPUT -p 47 -s "${saved_remote}" -j ACCEPT 2>/dev/null || true
+            iptables -D INPUT -p gre -s "${saved_remote}" -j ACCEPT 2>&1 \
+                || true
             # Also clean the NAT/MSS rules if forwarding was enabled.
             local iface
             iface="$(default_iface)"
@@ -666,16 +677,22 @@ uninstall() {
     iface="$(default_iface)"
     case "$fw" in
         ufw)
-            ufw delete allow in proto 47 from "$REMOTE_IP" any \
-                >>/dev/null 2>&1 || true
+            # Delete by the same canonical form we insert with. We iterate
+            # once per tunnel because each tunnel gets its own rule. A
+            # missing rule is fine — idempotent removal.
+            ufw delete allow in proto gre from "$REMOTE_IP" 2>&1 \
+                || true
             ;;
         firewalld)
-            # Remove any rich rule matching our tag pattern.
-            firewall-cmd --permanent --remove-rich-rule="rule protocol value=\"gre\" accept" >/dev/null 2>&1 || true
-            firewall-cmd --reload >/dev/null 2>&1 || true
+            # Remove any rich rule matching our peer's remote IP.
+            firewall-cmd --permanent \
+                --remove-rich-rule="rule protocol value=\"gre\" source address=\"$REMOTE_IP\" accept" \
+                2>&1 || true
+            firewall-cmd --reload 2>&1 || true
             ;;
         iptables)
-            iptables -D INPUT -p 47 -s 0.0.0.0/0 -j ACCEPT 2>/dev/null || true
+            iptables -D INPUT -p gre -s "$REMOTE_IP" -j ACCEPT 2>&1 \
+                || true
             iptables -t nat -D POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE 2>/dev/null || true
             iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
             netfilter-persistent save >/dev/null 2>&1 || true
@@ -897,4 +914,4 @@ detect_firewall() {
     fi
 }
 
-main
+[[ "${BASH_SOURCE[0]}" == "$0" ]] && main

@@ -45,7 +45,7 @@ Everything lives in this repo. No external toolchains beyond stock `apt`. Each i
 | # | Protocol | Core purpose | CI coverage |
 |---|----------|--------------|-------------|
 | 1 | **OpenVPN** ([`install_openvpn.sh`](install_openvpn.sh)) | Mature TLS-based VPN; client-rich ecosystem | ShellCheck strict (upstream installer; pin + SHA verified) |
-| 2 | **WireGuard** ([`wireguard-install.sh`](wireguard-install.sh)) | Modern, fast, minimal-crypto tunnel | ShellCheck error-only; in-tree sysctl; HTTPS public-IP detection |
+| 2 | **WireGuard** ([`wireguard-install.sh`](wireguard-install.sh)) | Modern, fast, minimal-crypto tunnel | ShellCheck error-only; in-tree UDP-optimized sysctl (no SysV msg queue caps); HTTPS public-IP detection |
 | 3 | **OpenConnect** ([`tools/ocserv.sh`](tools/ocserv.sh)) | SSL VPN with browser support (`ocserv`) | ShellCheck strict + `ocserv --test-config` |
 | 4 | **MTProto Proxy** ([`tools/mtproto.sh`](tools/mtproto.sh)) | Telegram proxy; anti-censorship | ShellCheck strict; binary pinned, SHA-256 verified |
 | 5 | **Cloudflare WARP** ([`tools/warp.sh`](tools/warp.sh)) | Commercial-grade zero-trust tunnel | ShellCheck strict; Cloudflare official repo |
@@ -105,7 +105,7 @@ Installs via the pinned [angristan/openvpn-install](https://github.com/angristan
 
 #### WireGuard (menu 2)
 
-Standalone `wireguard-install.sh` in this repo. Uses HTTPS for public-IP detection, embeds its own sysctl tuning (BBR + fq + socket buffers), and touches the MIT-licensed copyright header only for comments.
+Standalone `wireguard-install.sh` in this repo. Uses HTTPS for public-IP detection, embeds its own sysctl tuning (BDPR-aligned socket buffers + BBR + fq when available; intentionally excludes unrelated SysV message-queue knobs), and touches the MIT-licensed copyright header only for comments.
 
 #### OpenConnect (menu 3)
 
