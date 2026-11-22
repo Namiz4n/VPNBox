@@ -417,16 +417,21 @@ jobs:
         run: |
           set -eo pipefail
           REMOTE="203.0.113.9"
-          CONF_DIR="/etc/gre-tunnels"
-          mkdir -p "$CONF_DIR"
-          trap 'rm -rf -- "$CONF_DIR"' EXIT
+          TEST_STATE="$(mktemp -d)"
+          trap 'rm -rf -- "$TEST_STATE"' EXIT
+          # Override gre.sh's default state dirs so sourcing stays safe
+          # (no attempt to mkdir /etc/gre-tunnels etc. as unprivileged user).
+          export GRE_CONF_DIR="$TEST_STATE" \
+                 GRE_UNIT_DIR="$TEST_STATE/units" \
+                 SYSCTL="$TEST_STATE/sysctl.conf" \
+                 MODULES="$TEST_STATE/modules-load.d"
           # gre.sh guards its main; sourcing is safe because all helpers
           # are regular functions and won't fire the CLI case statement.
           source tools/gre.sh
-          # Pretend the variable main expects — we won't reach it because
-          # we only call allow_gre_firewall directly.
+          # Call the firewall helper with sudo because ufw operations are
+          # privileged; match exactly the command shape gre.sh emits today.
           REMOTE_IP="$REMOTE"
-          allow_gre_firewall
+          sudo allow_gre_firewall
           echo "--- ufw status after add ---"
           sudo ufw status verbose
           sudo ufw status numbered
@@ -437,18 +442,24 @@ jobs:
               || { echo "::error::ufw rule missing from ufw show added"; exit 1; }
           echo "GRE allow: ufw rule installed successfully."
 
-      - name: Source gre.sh and exercise remove_tunnel (remove)
+      - name: Source gre.sh and exercise remove path (remove)
         run: |
           set -eo pipefail
-          CONF_DIR="/etc/gre-tunnels"
-          # Keep the directory around but remove any stale conf files we don't need.
-          rm -f "$CONF_DIR"/*.conf 2>/dev/null || true
+          REMOTE="203.0.113.9"
+          TEST_STATE="$(mktemp -d)"
+          trap 'rm -rf -- "$TEST_STATE"' EXIT
+          export GRE_CONF_DIR="$TEST_STATE" \
+                 GRE_UNIT_DIR="$TEST_STATE/units" \
+                 SYSCTL="$TEST_STATE/sysctl.conf" \
+                 MODULES="$TEST_STATE/modules-load.d"
           source tools/gre.sh
-          # Emulate what remove_tunnel does when the config is gone: pass
-          # empty saved_remote; ufw delete on a missing rule returns non-zero
-          # but we swallow it with || true inside the function.
-          REMOTE_IP="203.0.113.9"
-          remove_tunnel "gre0" >/tmp/remove-gre.log 2>&1 || true
+          # remove_tunnel requires root because it tears down interfaces /
+          # systemd units; we pass a dummy name — the ufw branch runs even
+          # if no .conf file exists and falls back gracefully.
+          sudo REMOTE_IP="$REMOTE" bash -c '
+            source tools/gre.sh
+            remove_tunnel "gre0" >/tmp/remove-gre.log 2>&1 || true
+          '
           echo "--- gre.sh remove log ---"
           cat /tmp/remove-gre.log || true
           echo "--- ufw status after remove ---"
