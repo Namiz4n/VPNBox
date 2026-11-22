@@ -419,30 +419,32 @@ jobs:
           REMOTE="203.0.113.9"
           TEST_STATE="$(mktemp -d)"
           trap 'rm -rf -- "$TEST_STATE"' EXIT
+          # Override gre.sh's default state dirs so sourcing stays safe
+          # (no attempt to mkdir /etc/gre-tunnels etc. as unprivileged user).
           export GRE_CONF_DIR="$TEST_STATE" \
                  GRE_UNIT_DIR="$TEST_STATE/units" \
                  SYSCTL="$TEST_STATE/sysctl.conf" \
                  MODULES="$TEST_STATE/modules-load.d"
-          sudo bash -c "
-            REMOTE_IP='$REMOTE'
+          # Run everything under a single sudo so the sourced helpers and
+          # the ufw commands they invoke all execute with root privileges.
+          sudo bash <<'BASH'
+            set -euo pipefail
+            REMOTE="${REMOTE}"
+            REMOTE_IP="$REMOTE"
             source tools/gre.sh
             allow_gre_firewall
-          "
-          echo "--- ufw status after add ---"
-          sudo ufw status verbose
-          sudo ufw status numbered
-          # Verify the rule landed — ufw status verbose lists each rule
-          # with its full arguments on one line; we match on the keyword
-          # 'gre' next to 'proto' regardless of surrounding whitespace.
-          if ! sudo ufw status verbose | grep -qiE 'proto\s+gre'; then
-            echo "::error::ufw rule with proto gre not found in status verbose"
-            exit 1
-          fi
-          if ! sudo ufw show added | grep -qiE 'proto gre'; then
-            echo "::error::ufw rule with proto gre not found in show added"
-            exit 1
-          fi
-          echo "GRE allow: ufw rule installed successfully."
+            echo "--- ufw status after add ---"
+            ufw status verbose
+            ufw status numbered
+            # Verify the rule landed — ufw status verbose lists each rule
+            # with its full arguments on one line; match on keyword
+            # 'gre' next to 'proto' regardless of surrounding whitespace.
+            ufw status verbose | grep -qE 'proto gre' \
+                || { echo "::error::ufw rule with proto gre missing from status verbose"; exit 1; }
+            ufw show added | grep -qE 'proto gre' \
+                || { echo "::error::ufw rule with proto gre missing from show added"; exit 1; }
+            echo "GRE allow: ufw rule installed successfully."
+          BASH
 
       - name: Source gre.sh and exercise remove path (remove)
         run: |
@@ -454,18 +456,20 @@ jobs:
                  GRE_UNIT_DIR="$TEST_STATE/units" \
                  SYSCTL="$TEST_STATE/sysctl.conf" \
                  MODULES="$TEST_STATE/modules-load.d"
-          sudo bash -c "
-            REMOTE_IP='$REMOTE'
+          sudo bash <<'BASH'
+            set -euo pipefail
+            REMOTE="${REMOTE}"
+            REMOTE_IP="$REMOTE"
             source tools/gre.sh
-            remove_tunnel 'gre0' >/tmp/remove-gre.log 2>&1 || true
-          "
-          echo "--- gre.sh remove log ---"
-          cat /tmp/remove-gre.log || true
-          echo "--- ufw status after remove ---"
-          sudo ufw status verbose
-          # Rule must have been removed from both tables.
-          sudo ufw status verbose | grep -qiE 'proto\s+gre' \
-              && { echo "::error::ufw rule still present after remove"; exit 1; }
-          sudo ufw show added | grep -qiE 'proto\s+gre' \
-              && { echo "::error::ufw recorded rule still present after remove"; exit 1; }
-          echo "GRE remove: ufw rule cleaned up successfully."
+            remove_tunnel "gre0" >/tmp/remove-gre.log 2>&1 || true
+            echo "--- gre.sh remove log ---"
+            cat /tmp/remove-gre.log || true
+            echo "--- ufw status after remove ---"
+            ufw status verbose
+            # Rule must have been removed from both tables.
+            ufw status verbose | grep -qE 'proto gre' \
+                && { echo "::error::ufw rule still present after remove"; exit 1; }
+            ufw show added | grep -qE 'proto gre' \
+                && { echo "::error::ufw recorded rule still present after remove"; exit 1; }
+            echo "GRE remove: ufw rule cleaned up successfully."
+          BASH
