@@ -441,13 +441,21 @@ jobs:
           chmod +x /tmp/_gre_test_add.sh
           # Run the test script under sudo; capture both stdout (redirected
           # inside the script to gre-allow-out.txt) and any stderr.
-          sudo REMOTE="$REMOTE" bash /tmp/_gre_test_add.sh > /tmp/gre-allow-stderr.txt 2>&1
-          # The inner script redirected its own stdout into gre-allow-out.txt;
-          # what remains on stdout/stderr here is anything printed there.
-          echo "--- sudo stdout+stderr ---"
-          cat /tmp/gre-allow-stderr.txt
-          echo "--- captured ufw output ---"
+          sudo REMOTE="$REMOTE" bash /tmp/_gre_test_add.sh \
+              > /tmp/gre-allow-stdout.txt \
+              2> /tmp/gre-allow-stderr.txt
+          # Dump everything for diagnosis — this run is meant to fail loudly.
+          echo "--- sudo stderr ---"
+          cat /tmp/gre-allow-stderr.txt || true
+          echo ""
+          echo "--- ufw verbose output ---"
           cat /tmp/gre-allow-out.txt || true
+          echo ""
+          echo "--- ufw show added ---"
+          sudo ufw show added || true
+          echo ""
+          echo "--- raw ufw status verbose ---"
+          sudo ufw status verbose || true
           # Check that ufw accepted the rule — verbose output may vary by release.
           if ! grep -qi 'proto gre' /tmp/gre-allow-out.txt; then
             echo "::error::no proto-gre entry found in ufw output" >&2
