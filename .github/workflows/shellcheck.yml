@@ -413,81 +413,76 @@ jobs:
           sudo ufw status verbose | head -5
           echo "ufw bootstrapped OK."
 
-      - name: Source gre.sh and exercise allow_gre_firewall (add)
+      - name: Exercise gre.sh add then remove (one script, shared state)
         run: |
           set -eo pipefail
           REMOTE="203.0.113.9"
           TEST_STATE="$(mktemp -d)"
           trap 'rm -rf -- "$TEST_STATE"' EXIT
           # Override gre.sh's default state dirs so sourcing stays safe
-          # (no attempt to mkdir /etc/gre-tunnels etc. as unprivileged user).
+          # (no attempt to mkdir /etc/gre-tunnels etc. as unprivileged user)
+          # and so the config written by create_tunnel lives in a temp dir.
           export GRE_CONF_DIR="$TEST_STATE" \
                  GRE_UNIT_DIR="$TEST_STATE/units" \
                  SYSCTL="$TEST_STATE/sysctl.conf" \
                  MODULES="$TEST_STATE/modules-load.d"
-          # Write a small helper script we can hand to sudo.
-          # Using a file sidesteps quoting/heredoc issues with sudo+bash.
-          cat > /tmp/_gre_test_add.sh <<'INNER'
+          # We need one continuous sudo context for add+remove so:
+          #   1) ufw state persists between steps
+          #   2) the tunnel config file (written by create_tunnel) exists when
+          #      remove_tunnel sources it via CONF_DIR, giving saved_remote a value.
+          cat > /tmp/_gre_ufw_test.sh <<'INNER'
             set -euo pipefail
             REMOTE="${REMOTE:-203.0.113.9}"
             REMOTE_IP="${REMOTE}"
-            echo "[helper] starting, REMOTE=$REMOTE REMOTE_IP=$REMOTE_IP"
+            NAME="gre0"
+            # Use the runner's real public-ish IP as LOCAL_IP; fall back to 127.0.0.1
+            # when the network is too restricted to return anything usable.
+            LOCAL_IP="$(hostname -I | awk '{print $1}')"
+            [[ -z "$LOCAL_IP" || "$LOCAL_IP" == "127.0.0.1" ]] \
+                && LOCAL_IP="$(ip -4 addr show eth0 2>/dev/null \
+                    | awk '/inet / {print $2}' | cut -d/ -f1 \
+                    || echo 127.0.0.1)"
+            echo "[test] LOCAL_IP=$LOCAL_IP REMOTE_IP=$REMOTE_IP"
             source tools/gre.sh
-            echo "[helper] sourcing done, calling allow_gre_firewall"
-            if ! allow_gre_firewall; then
-              echo "[helper] allow_gre_firewall FAILED" >&2
+
+            # --- Add ---
+            NAME="$NAME" LOCAL_IP="$LOCAL_IP" REMOTE_IP="$REMOTE_IP" \
+              bash -c create_tunnel
+            echo "[test] add done"
+            ufw_status="$(ufw status verbose 2>/dev/null || true)"
+            ufw_added="$(ufw show added 2>/dev/null || true)"
+            echo "--- ufw status verbose ---"
+            echo "$ufw_status"
+            echo "--- ufw show added ---"
+            echo "$ufw_added"
+            if ! echo "$ufw_status" | grep -qi 'proto gre'; then
+              echo "::error::proto-gre rule not present in ufw after add"
               exit 1
             fi
-            echo "[helper] firewall ok"
-            ufw status verbose
-            ufw status numbered
-            ufw show added
-            echo "[helper] DONE"
-          INNER
-          chmod +x /tmp/_gre_test_add.sh
-          # Run the test script under sudo; capture ALL output (both stdout
-          # and stderr) into one diagnostic file so failures are visible.
-          sudo REMOTE="$REMOTE" bash /tmp/_gre_test_add.sh \
-              > /tmp/gre-allow-all.txt 2>&1 || true
-          echo "--- full helper output ---"
-          cat /tmp/gre-allow-all.txt
-          echo ""
-          echo "--- live ufw show added ---"
-          sudo ufw show added
-          echo ""
-          echo "--- live ufw status verbose ---"
-          sudo ufw status verbose
-          # Verify the rule landed.
-          if ! grep -qi 'proto gre' /tmp/gre-allow-all.txt; then
-            echo "::error::no proto-gre entry found in ufw output"
-            exit 1
-          fi
-          echo "GRE allow: ufw rule installed successfully."
+            echo "[test] add verified: proto gre rule present"
 
-      - name: Source gre.sh and exercise remove path (remove)
-        run: |
-          set -eo pipefail
-          REMOTE="203.0.113.9"
-          TEST_STATE="$(mktemp -d)"
-          trap 'rm -rf -- "$TEST_STATE"' EXIT
-          export GRE_CONF_DIR="$TEST_STATE" \
-                 GRE_UNIT_DIR="$TEST_STATE/units" \
-                 SYSCTL="$TEST_STATE/sysctl.conf" \
-                 MODULES="$TEST_STATE/modules-load.d"
-          sudo env "REMOTE=${REMOTE}" bash <<'BASH'
-            set -euo pipefail
-            REMOTE="${REMOTE}"
-            REMOTE_IP="${REMOTE}"
-            source tools/gre.sh
-            remove_tunnel "gre0" >/tmp/remove-gre.log 2>&1 || true
-            echo "--- gre.sh remove log ---"
-            cat /tmp/remove-gre.log || true
-            echo "--- ufw status after remove ---"
-            ufw status verbose
-            # Rule must have been removed from both tables.
-            ufw status verbose | grep -qE 'proto gre' \
-                && { echo "::error::ufw rule still present after remove"; exit 1; }
-            ufw show added | grep -qE 'proto gre' \
-                && { echo "::error::ufw recorded rule still present after remove"; exit 1; }
-            echo "GRE remove: ufw rule cleaned up successfully."
-          BASH
+            # --- Remove ---
+            NAME="$NAME" LOCAL_IP="$LOCAL_IP" REMOTE_IP="$REMOTE_IP" \
+              bash -c 'remove_tunnel "gre0"'
+            echo "[test] remove done"
+            ufw_status_after="$(ufw status verbose 2>/dev/null || true)"
+            ufw_added_after="$(ufw show added 2>/dev/null || true)"
+            echo "--- ufw status verbose after remove ---"
+            echo "$ufw_status_after"
+            echo "--- ufw show added after remove ---"
+            echo "$ufw_added_after"
+            if echo "$ufw_status_after" | grep -qE 'proto gre'; then
+              echo "::error::ufw rule still present after remove"
+              exit 1
+            fi
+            if echo "$ufw_added_after" | grep -qE 'proto gre'; then
+              echo "::error::ufw recorded rule still present after remove"
+              exit 1
+            fi
+            echo "[test] GRE ufw rule add/remove PASSED"
+          INNER
+          chmod +x /tmp/_gre_ufw_test.sh
+          # Run everything under one sudo session so the filesystem, ufw state,
+          # and tunnel config file are all consistent across add → verify →
+          # remove → verify.
+          sudo REMOTE="$REMOTE" bash /tmp/_gre_ufw_test.sh
