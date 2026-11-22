@@ -970,8 +970,10 @@ update_sysctl() {
 	fi
 	# UDP-optimized tunables for a WireGuard tunnel on Debian/Ubuntu.
 	# Values chosen for a typical VPS (1 Gbps LAN, <1 ms RTT):
-	#   BDPR ~ 1 GiB/s * 1 ms = 125 KiB per direction; round up to 16 MiB
-	#   for headroom under bursty traffic and kernel overhead.
+	#   BDPR (Bandwidth-Delay Product): 1 Gbit/s × 100 ms = 12.5 MB;
+	#   rounding up to 16 MiB leaves headroom for bursty traffic and
+	#   kernel overhead. TCP rmem/wmem keep existing connections happy
+	#   when userspace mixes VPN + web traffic over the same NIC.
 	# TCP rmem/wmem keep existing connections happy when userspace mixes
 	# VPN + web traffic over the same NIC.  No need to touch SysV message
 	# queues (msgmnb/msgmax) — they are unrelated to network I/O.

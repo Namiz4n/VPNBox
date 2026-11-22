@@ -46,7 +46,7 @@ jobs:
           echo "--- generated ocserv.conf ---"
           cat /tmp/ocserv-test.conf
           sudo mkdir -p /etc/ocserv/ssl
-          sudo openssl req -x509 -nodes -newkey rsa-2048 -days 30 \
+          sudo openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
             -keyout /etc/ocserv/ssl/server-key.pem \
             -out  /etc/ocserv/ssl/server-cert.pem \
             -subj "/CN=vpn.local"
@@ -124,22 +124,47 @@ jobs:
           awk '/^--- \/etc\/ppp\/options\.xl2tpd$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
               | sudo tee /etc/ppp/options.xl2tpd >/dev/null
 
-           echo "=== strongSwan starter output ==="
-           rc=0
-           # Use timeout to prevent hanging on valid config; exit code 124 = healthy daemon
-           starter_out="$(timeout 10 sudo /usr/lib/ipsec/starter --nofork 2>&1)" || rc=$?
-           echo "$starter_out"
-           if [[ "$rc" -eq 124 ]]; then
-             echo "strongSwan starter ran for 10s without crashing (likely healthy)."
-           elif [[ "$rc" -ne 0 ]]; then
-             echo "::error::strongSwan starter failed (exit $rc); see above output"
-             exit 1
-           fi
-           if echo "$starter_out" | grep -iqE 'unknown keyword|parsing error'; then
-             echo "::error::strongSwan starter reported unknown keywords or parsing errors"
-             exit 1
-           fi
-           echo "strongSwan starter: OK."
+          # The packaged strongSwan service can auto-start on install/daemon-reload,
+          # which makes our manual `starter --nofork` fail with "already running".
+          # Stop/disable any such service so we own the XFRM stack during this test.
+          sudo systemctl stop strongswan-starter strongswan xl2tpd 2>/dev/null || true
+          sudo systemctl disable strongswan-starter strongswan xl2tpd 2>/dev/null || true
+          sudo pkill charon 2>/dev/null || true
+          sudo ip xfrm state flush 2>/dev/null || true
+          sudo ip xfrm policy flush 2>/dev/null || true
+
+          echo "=== strongSwan starter output ==="
+          rc=0
+          # Use timeout to prevent hanging on valid config; exit code 124 = healthy daemon.
+          # Exit code 1 means "already running" from a leftover package service — not a config bug.
+          starter_out="$(timeout 10 sudo /usr/lib/ipsec/starter --nofork 2>&1)" || rc=$?
+          echo "$starter_out"
+          if [[ "$rc" -eq 124 ]]; then
+            echo "strongSwan starter ran for 10s without crashing (likely healthy)."
+          elif [[ "$rc" -eq 1 ]]; then
+            echo "::warning::strongSwan starter refused to start (rc=1), likely a stray service or XFRM stale-state; flushing and retrying once."
+            sudo ip xfrm state flush 2>/dev/null || true
+            sudo ip xfrm policy flush 2>/dev/null || true
+            sudo pkill charon 2>/dev/null || true
+            starter_out2="$(timeout 10 sudo /usr/lib/ipsec/starter --nofork 2>&1)" || rc=$?
+            echo "$starter_out2"
+            if [[ "$rc" -ne 124 && "$rc" -ne 0 ]]; then
+              echo "::error::strongSwan starter failed after flush (exit $rc); see above output"
+              exit 1
+            fi
+            echo "strongSwan starter: OK (after flush)."
+          elif [[ "$rc" -ne 0 ]]; then
+            echo "::error::strongSwan starter failed (exit $rc); see above output"
+            exit 1
+          else
+            echo "strongSwan starter exited cleanly."
+          fi
+          # Only parse errors are fatal; timeout (124) and XFRM/netlink environment errors are okay.
+          if echo "$starter_out$starter_out2" | grep -iqE 'unknown keyword|parsing error|syntax error'; then
+            echo "::error::strongSwan starter reported parsing errors"
+            exit 1
+          fi
+          echo "strongSwan starter: OK."
 
           echo "=== xl2tpd startup check ==="
           sudo rm -f /var/run/xl2tpd/l2tp-control
@@ -413,74 +438,62 @@ jobs:
           sudo ufw status verbose | head -5
           echo "ufw bootstrapped OK."
 
-      - name: Exercise gre.sh add then remove (one script, shared state)
+      - name: Exercise gre.sh add then remove (real paths, one sudo pass)
         run: |
           set -eo pipefail
           REMOTE="203.0.113.9"
-          TEST_STATE="$(mktemp -d)"
-          trap 'rm -rf -- "$TEST_STATE"' EXIT
-          # Override gre.sh's default state dirs so sourcing stays safe
-          # (no attempt to mkdir /etc/gre-tunnels etc. as unprivileged user)
-          # and so the config written by create_tunnel lives in a temp dir.
-          export GRE_CONF_DIR="$TEST_STATE" \
-                 GRE_UNIT_DIR="$TEST_STATE/units" \
-                 SYSCTL="$TEST_STATE/sysctl.conf" \
-                 MODULES="$TEST_STATE/modules-load.d"
-          # We need one continuous sudo context for add+remove so:
-          #   1) ufw state persists between steps
-          #   2) the tunnel config file (written by create_tunnel) exists when
-          #      remove_tunnel sources it via CONF_DIR, giving saved_remote a value.
-          cat > /tmp/_gre_ufw_test.sh <<'INNER'
+          # Grab the runner's actual IPv4 address (eth0 is standard on GitHub
+          # Actions runners; fall back to hostname -I if that interface is
+          # missing).
+          LOCAL_IP="$(ip -4 addr show eth0 2>/dev/null \
+              | awk '/inet / {print $2}' | cut -d/ -f1 \
+              || hostname -I | awk '{print $1}')"
+          [[ -z "$LOCAL_IP" ]] && LOCAL_IP="127.0.0.1"
+          sudo REMOTE="$REMOTE" bash -c "
             set -eo pipefail
-            REMOTE="${REMOTE:-203.0.113.9}"
-            REMOTE_IP="${REMOTE}"
-            NAME="gre0"
-            # Use the runner's real public-ish IP as LOCAL_IP; fall back to 127.0.0.1
-            # when the network is too restricted to return anything usable.
-            LOCAL_IP="$(hostname -I | awk '{print $1}')"
-            [[ -z "$LOCAL_IP" || "$LOCAL_IP" == "127.0.0.1" ]] \
-                && LOCAL_IP="$(ip -4 addr show eth0 2>/dev/null \
-                    | awk '/inet / {print $2}' | cut -d/ -f1 \
-                    || echo 127.0.0.1)"
-            echo "[test] LOCAL_IP=$LOCAL_IP REMOTE_IP=$REMOTE_IP"
-            source tools/gre.sh
-
-            # --- Add via create_tunnel (fires allow_gre_firewall internally) ---
+            REMOTE_IP='$REMOTE'
+            LOCAL_IP='$LOCAL_IP'
+            NAME='gre0'
+            source '$GITHUB_WORKSPACE/tools/gre.sh'
+            echo '[test] LOCAL_IP=\$LOCAL_IP REMOTE_IP=\$REMOTE_IP'
+            # --- Add ---
             create_tunnel
-            echo "[test] add done"
-            ufw_status="$(ufw status verbose 2>/dev/null || true)"
-            ufw_added="$(ufw show added 2>/dev/null || true)"
-            echo "--- ufw status verbose ---"
-            echo "$ufw_status"
-            echo "--- ufw show added ---"
-            echo "$ufw_added"
-            if ! echo "$ufw_status" | grep -qi 'proto gre'; then
-              echo "::error::proto-gre rule not present in ufw after add"
+            echo '[test] add done'
+            ufw_status='\$(sudo ufw status verbose 2>/dev/null || true)'
+            ufw_added='\$(sudo ufw show added 2>/dev/null || true)'
+            echo '--- ufw status verbose ---'
+            echo '\$ufw_status'
+            echo '--- ufw show added ---'
+            echo '\$ufw_added'
+            if ! echo \"\$ufw_status\" | grep -qi 'proto gre'; then
+              echo '::error::proto-gre rule not present in ufw after add'
               exit 1
             fi
-            echo "[test] add verified: proto gre rule present"
-
-            # --- Remove via remove_tunnel (fires ufw delete internally) ---
-            remove_tunnel "gre0"
-            echo "[test] remove done"
-            ufw_status_after="$(ufw status verbose 2>/dev/null || true)"
-            ufw_added_after="$(ufw show added 2>/dev/null || true)"
-            echo "--- ufw status verbose after remove ---"
-            echo "$ufw_status_after"
-            echo "--- ufw show added after remove ---"
-            echo "$ufw_added_after"
-            if echo "$ufw_status_after" | grep -qE 'proto gre'; then
-              echo "::error::ufw rule still present after remove"
+            echo '[test] add verified: proto gre rule present'
+            # --- Remove ---
+            remove_tunnel 'gre0'
+            echo '[test] remove done'
+            ufw_after='\$(sudo ufw status verbose 2>/dev/null || true)'
+            added_after='\$(sudo ufw show added 2>/dev/null || true)'
+            echo '--- ufw status verbose after remove ---'
+            echo '\$ufw_after'
+            echo '--- ufw show added after remove ---'
+            echo '\$added_after'
+            if echo \"\$ufw_after\" | grep -qE 'proto gre'; then
+              echo '::error::ufw rule still present after remove'
               exit 1
             fi
-            if echo "$ufw_added_after" | grep -qE 'proto gre'; then
-              echo "::error::ufw recorded rule still present after remove"
+            if echo \"\$added_after\" | grep -qE 'proto gre'; then
+              echo '::error::ufw recorded rule still present after remove'
               exit 1
             fi
-            echo "[test] GRE ufw rule add/remove PASSED"
-          INNER
-          chmod +x /tmp/_gre_ufw_test.sh
-          # Run everything under one sudo session so the filesystem, ufw state,
-          # and tunnel config file are all consistent across add → verify →
-          # remove → verify.
-          sudo REMOTE="$REMOTE" bash /tmp/_gre_ufw_test.sh
+            echo '[test] GRE ufw rule add/remove PASSED'
+          "
+      - name: Clean up gre state after test
+        if: always()
+        run: |
+          set -eo pipefail
+          sudo rm -rf /etc/gre-tunnels
+          sudo rm -f /etc/systemd/system/gre-gre*.service
+          sudo systemctl daemon-reload 2>/dev/null || true
+          sudo rm -f /etc/sysctl.d/90-gre.conf /etc/modules-load.d/gre.conf
