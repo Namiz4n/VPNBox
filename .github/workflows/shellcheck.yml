@@ -445,18 +445,12 @@ jobs:
             echo "[helper] DONE"
           INNER
           chmod +x /tmp/_gre_test_add.sh
-          # Run the test script under sudo, capturing ALL output (both stdout
-          # and stderr) so failures surface in the CI log.  The inner script
-          # redirects its own stdout to gre-allow-out.txt via exec inside the
-          # here-doc, so everything else (echo/logging, errors) lands on the
-          # outer fd which we capture below.
+          # Run the test script under sudo; capture ALL output (both stdout
+          # and stderr) into one diagnostic file so failures are visible.
           sudo REMOTE="$REMOTE" bash /tmp/_gre_test_add.sh \
-              > /tmp/gre-allow-all.txt 2>&1
+              > /tmp/gre-allow-all.txt 2>&1 || true
           echo "--- full helper output ---"
           cat /tmp/gre-allow-all.txt
-          echo ""
-          echo "--- captured ufw output (from inner script exec redirect) ---"
-          cat /tmp/gre-allow-out.txt || true
           echo ""
           echo "--- live ufw show added ---"
           sudo ufw show added
@@ -464,7 +458,7 @@ jobs:
           echo "--- live ufw status verbose ---"
           sudo ufw status verbose
           # Verify the rule landed.
-          if ! grep -qi 'proto gre' /tmp/gre-allow-out.txt; then
+          if ! grep -qi 'proto gre' /tmp/gre-allow-all.txt; then
             echo "::error::no proto-gre entry found in ufw output"
             exit 1
           fi
