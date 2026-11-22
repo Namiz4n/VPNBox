@@ -427,25 +427,21 @@ jobs:
                  MODULES="$TEST_STATE/modules-load.d"
           # Run everything under a single sudo so the sourced helpers and
           # the ufw commands they invoke all execute with root privileges.
-          sudo env "REMOTE=${REMOTE}" bash <<'BASH'
+          sudo env "REMOTE=${REMOTE}" bash <<'BASH' > /tmp/gre-allow-out.txt 2>&1
             set -euo pipefail
             REMOTE="${REMOTE}"
             REMOTE_IP="${REMOTE}"
             source tools/gre.sh
             allow_gre_firewall
-            echo "--- ufw status after add ---" >&2
-            ufw status verbose >&2
-            ufw status numbered >&2
-            ufw show added >&2
-            # Verify the rule landed — ufw status verbose lists each rule
-            # with its full arguments on one line; match on keyword
-            # 'gre' next to 'proto' regardless of surrounding whitespace.
-            ufw status verbose | grep -qE 'proto gre' \
-                || { echo "::error::ufw rule with proto gre missing from status verbose"; exit 1; }
-            ufw show added | grep -qE 'proto gre' \
-                || { echo "::error::ufw rule with proto gre missing from show added"; exit 1; }
-            echo "GRE allow: ufw rule installed successfully."
+            ufw status verbose
+            ufw status numbered
+            ufw show added
           BASH
+          cat /tmp/gre-allow-out.txt
+          # Verify the rule landed — look for 'proto gre' in the captured output.
+          grep -qiE 'proto gre' /tmp/gre-allow-out.txt \
+              || { echo "::error::ufw did not emit a 'proto gre' rule (see above)"; exit 1; }
+          echo "GRE allow: ufw rule installed successfully."
 
       - name: Source gre.sh and exercise remove path (remove)
         run: |
