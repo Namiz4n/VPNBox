@@ -439,9 +439,15 @@ jobs:
             ufw show added
           INNER
           chmod +x /tmp/_gre_test_add.sh
-          sudo REMOTE="$REMOTE" bash /tmp/_gre_test_add.sh
-          # Dump the captured output for diagnostics.
-          cat /tmp/gre-allow-out.txt
+          # Run the test script under sudo; capture both stdout (redirected
+          # inside the script to gre-allow-out.txt) and any stderr.
+          sudo REMOTE="$REMOTE" bash /tmp/_gre_test_add.sh > /tmp/gre-allow-stderr.txt 2>&1
+          # The inner script redirected its own stdout into gre-allow-out.txt;
+          # what remains on stdout/stderr here is anything printed there.
+          echo "--- sudo stdout+stderr ---"
+          cat /tmp/gre-allow-stderr.txt
+          echo "--- captured ufw output ---"
+          cat /tmp/gre-allow-out.txt || true
           # Check that ufw accepted the rule — verbose output may vary by release.
           if ! grep -qi 'proto gre' /tmp/gre-allow-out.txt; then
             echo "::error::no proto-gre entry found in ufw output" >&2
