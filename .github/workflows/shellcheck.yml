@@ -437,10 +437,17 @@ jobs:
             ufw status numbered
             ufw show added
           BASH
+          # Always dump the captured output so failures are diagnosable.
           cat /tmp/gre-allow-out.txt
-          # Verify the rule landed — look for 'proto gre' in the captured output.
-          grep -qiE 'proto gre' /tmp/gre-allow-out.txt \
-              || { echo "::error::ufw did not emit a 'proto gre' rule (see above)"; exit 1; }
+          # Verify the rule landed. ufw prints each rule as
+          # "ALLOW IN from <IP> proto gre" on one line in verbose mode
+          # (the exact column layout varies by ufw release), so match
+          # loosely on the pair of keywords 'proto gre' together with
+          # the peer IP.
+          if ! grep -qE 'from '"$REMOTE"' proto gre' /tmp/gre-allow-out.txt; then
+            echo "::error::ufw did not install the expected 'proto gre' rule"
+            exit 1
+          fi
           echo "GRE allow: ufw rule installed successfully."
 
       - name: Source gre.sh and exercise remove path (remove)
