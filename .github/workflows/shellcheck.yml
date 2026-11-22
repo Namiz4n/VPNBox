@@ -431,21 +431,18 @@ jobs:
             set -euo pipefail
             REMOTE="${REMOTE:-203.0.113.9}"
             REMOTE_IP="${REMOTE}"
-            # Capture the full stderr so failures surface in the CI log.
-            exec 2>/tmp/gre-test-stderr.txt
-            echo "[helper] starting, REMOTE=$REMOTE REMOTE_IP=$REMOTE_IP" >&2
+            echo "[helper] starting, REMOTE=$REMOTE REMOTE_IP=$REMOTE_IP"
             source tools/gre.sh
-            echo "[helper] sourcing done, calling allow_gre_firewall" >&2
-            allow_gre_firewall || {
-              echo "[helper] allow_gre_firewall FAILED with $?" >&2
+            echo "[helper] sourcing done, calling allow_gre_firewall"
+            if ! allow_gre_firewall; then
+              echo "[helper] allow_gre_firewall FAILED" >&2
               exit 1
-            }
-            echo "[helper] firewall ok, dumping ufw state to gre-allow-out.txt" >&2
-            exec >/tmp/gre-allow-out.txt
+            fi
+            echo "[helper] firewall ok"
             ufw status verbose
             ufw status numbered
             ufw show added
-            echo "[helper] DONE" >&2
+            echo "[helper] DONE"
           INNER
           chmod +x /tmp/_gre_test_add.sh
           # Run the test script under sudo; capture both stdout (redirected
