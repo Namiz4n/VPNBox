@@ -481,7 +481,7 @@ jobs:
             echo "$ufw_status"
             echo "--- ufw show added ---"
             echo "$ufw_added"
-            if ! echo "$ufw_status" | grep -qi 'proto gre'; then
+            if ! echo "$ufw_added" | grep -qi 'proto gre'; then
               echo "::error::proto-gre rule not present in ufw after add"
               exit 1
             fi
