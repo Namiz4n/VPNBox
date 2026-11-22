@@ -425,26 +425,26 @@ jobs:
                  GRE_UNIT_DIR="$TEST_STATE/units" \
                  SYSCTL="$TEST_STATE/sysctl.conf" \
                  MODULES="$TEST_STATE/modules-load.d"
-          # Run everything under a single sudo so the sourced helpers and
-          # the ufw commands they invoke all execute with root privileges.
-          sudo env "REMOTE=${REMOTE}" bash <<'BASH' > /tmp/gre-allow-out.txt 2>&1
+          # Write a small helper script we can hand to sudo.
+          # Using a file sidesteps quoting/heredoc issues with sudo+bash.
+          cat > /tmp/_gre_test_add.sh <<'INNER'
             set -euo pipefail
-            REMOTE="${REMOTE}"
+            REMOTE="${REMOTE:-203.0.113.9}"
             REMOTE_IP="${REMOTE}"
             source tools/gre.sh
             allow_gre_firewall
+            exec >/tmp/gre-allow-out.txt
             ufw status verbose
             ufw status numbered
             ufw show added
-          BASH
-          # Always dump the captured output so failures are diagnosable.
+          INNER
+          chmod +x /tmp/_gre_test_add.sh
+          sudo REMOTE="$REMOTE" bash /tmp/_gre_test_add.sh
+          # Dump the captured output for diagnostics.
           cat /tmp/gre-allow-out.txt
-          # Verify the rule landed. ufw prints each rule as
-          # "ALLOW IN from <IP> proto gre" on one line in verbose mode
-          # (the exact column layout varies by ufw release), so match
-          # loosely on the pair of keywords 'proto gre' together with
-          # the peer IP.
-          if ! grep -qE 'from '"$REMOTE"' proto gre' /tmp/gre-allow-out.txt; then
+          # ufw prints each rule as "ALLOW IN from <IP> proto gre" in
+          # verbose mode; match the full rule shape against the capture.
+          if ! grep -qE 'from '"${REMOTE}"' proto gre' /tmp/gre-allow-out.txt; then
             echo "::error::ufw did not install the expected 'proto gre' rule"
             exit 1
           fi
