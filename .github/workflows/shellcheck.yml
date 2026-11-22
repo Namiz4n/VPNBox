@@ -446,8 +446,7 @@ jobs:
             source tools/gre.sh
 
             # --- Add ---
-            NAME="$NAME" LOCAL_IP="$LOCAL_IP" REMOTE_IP="$REMOTE_IP" \
-              bash -c create_tunnel
+            ( export NAME LOCAL_IP REMOTE_IP; create_tunnel )
             echo "[test] add done"
             ufw_status="$(ufw status verbose 2>/dev/null || true)"
             ufw_added="$(ufw show added 2>/dev/null || true)"
@@ -462,8 +461,7 @@ jobs:
             echo "[test] add verified: proto gre rule present"
 
             # --- Remove ---
-            NAME="$NAME" LOCAL_IP="$LOCAL_IP" REMOTE_IP="$REMOTE_IP" \
-              bash -c 'remove_tunnel "gre0"'
+            ( export NAME LOCAL_IP REMOTE_IP; remove_tunnel "gre0" )
             echo "[test] remove done"
             ufw_status_after="$(ufw status verbose 2>/dev/null || true)"
             ufw_added_after="$(ufw show added 2>/dev/null || true)"
