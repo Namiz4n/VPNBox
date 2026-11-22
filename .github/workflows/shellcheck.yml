@@ -427,15 +427,16 @@ jobs:
                  MODULES="$TEST_STATE/modules-load.d"
           # Run everything under a single sudo so the sourced helpers and
           # the ufw commands they invoke all execute with root privileges.
-          sudo bash <<'BASH'
+          sudo env "REMOTE=${REMOTE}" bash <<'BASH'
             set -euo pipefail
             REMOTE="${REMOTE}"
-            REMOTE_IP="$REMOTE"
+            REMOTE_IP="${REMOTE}"
             source tools/gre.sh
             allow_gre_firewall
-            echo "--- ufw status after add ---"
-            ufw status verbose
-            ufw status numbered
+            echo "--- ufw status after add ---" >&2
+            ufw status verbose >&2
+            ufw status numbered >&2
+            ufw show added >&2
             # Verify the rule landed — ufw status verbose lists each rule
             # with its full arguments on one line; match on keyword
             # 'gre' next to 'proto' regardless of surrounding whitespace.
@@ -456,10 +457,10 @@ jobs:
                  GRE_UNIT_DIR="$TEST_STATE/units" \
                  SYSCTL="$TEST_STATE/sysctl.conf" \
                  MODULES="$TEST_STATE/modules-load.d"
-          sudo bash <<'BASH'
+          sudo env "REMOTE=${REMOTE}" bash <<'BASH'
             set -euo pipefail
             REMOTE="${REMOTE}"
-            REMOTE_IP="$REMOTE"
+            REMOTE_IP="${REMOTE}"
             source tools/gre.sh
             remove_tunnel "gre0" >/tmp/remove-gre.log 2>&1 || true
             echo "--- gre.sh remove log ---"
