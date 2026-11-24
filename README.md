@@ -127,7 +127,7 @@ Uses `pptpd` (MS-CHAPv2 + 128-bit MPPE). Exits early on Ubuntu 24.04+ where the 
 
 Generates `ipsec.conf` / `ipsec.secrets` (strongSwan, classic stroke format) and `xl2tpd.conf` / `options.xl2tpd` from scratch. CI feeds those exact files to strongSwan's `starter --nofork` and `xl2tpd -D`; any unknown keyword or parse error fails the build, and a missing `starter` binary fails the build too.
 
-The classic `ipsec.conf` is only read by `starter` from the **`strongswan-starter`** package, so the tool installs `strongswan-starter strongswan-charon xl2tpd ppp` explicitly and checks each with `apt-cache show` first; if one is missing it stops before changing anything. The `strongswan` metapackage is not enough on newer releases: there it resolves to `charon-systemd` + `strongswan-swanctl` and installs no starter.
+The classic `ipsec.conf` is only read by `starter` from the **`strongswan-starter`** package, so the tool installs `strongswan-starter strongswan-charon xl2tpd ppp` explicitly and first checks that each has an install candidate (`apt-cache policy`); if one is missing it stops before changing anything. The `strongswan` metapackage is not enough on newer releases: there it resolves to `charon-systemd` + `strongswan-swanctl` and installs no starter.
 
 **Supported OS for `l2tp.sh`** — verified by the `l2tp-os-matrix` CI job (official Docker image per release: `apt-get update`, `apt-cache policy`, `apt-cache depends strongswan`, explicit install, `l2tp.sh preflight`, real `starter` + `xl2tpd` validation), run [45451529139](https://github.com/Namiz4n/VPNBox/actions/runs/45451529139), 24 Nov 2026 (amd64). Versions are the candidates on that date and will drift with point updates:
 
