@@ -12,10 +12,10 @@
 # is left behind in the current working directory.
 #
 # One-liner:
-#   bash <(curl -Ls https://raw.githubusercontent.com/Namiz4n/VPNBox/refs/heads/main/main.sh)
+#   bash <(curl -Ls --max-time 60 --retry 3 https://raw.githubusercontent.com/Namiz4n/VPNBox/refs/heads/main/main.sh)
 #
 # Override the repo ref used to fetch this repo's own child scripts:
-#   VPN_INSTALL_REF=my-branch bash <(curl -Ls ...)
+#   VPN_INSTALL_REF=my-branch bash <(curl -Ls --max-time 60 --retry 3 ...)
 
 set -uo pipefail
 
@@ -54,7 +54,7 @@ run_remote_script() {
     tmp="$(mktemp /tmp/vpnbox.XXXXXX)"
 
     echo -e "${GREEN}Fetching ${filename}...${NC}" >&2
-    if ! curl -fsSL --retry 3 -o "$tmp" "$url"; then
+    if ! curl -fsSL --max-time 60 --retry 3 -o "$tmp" "$url"; then
         echo -e "${RED}Error: failed to download ${filename} from ${url}${NC}" >&2
         rm -f "$tmp"
         echo ""

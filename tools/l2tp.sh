@@ -147,7 +147,10 @@ usage() {
 Usage: bash l2tp.sh [subcommand] [flags]
   No arguments: guided install or management menu (recommended).
   Subcommands: install | add-user <name> | remove-user <name> | list-users
-               | print-config | uninstall
+               | print-config | preflight | uninstall
+  preflight: check that strongswan-starter, strongswan-charon, xl2tpd and
+             ppp are installable here (no changes; explains a missing
+             Ubuntu 'universe' component).
   Flags: --auto, --psk <key>, --client-subnet <cidr>, --ip-range <a>-<b>,
          --public-ip <ip> (default: auto-detected), --dns <a> [--dns <b>],
          --no-forwarding
@@ -781,6 +784,7 @@ while [[ $# -gt 0 ]]; do
         remove-user) cmd="remove-user"; USER_ARG="${1:-${L2TP_USER:-}}"; shift; [[ $# -gt 0 ]] && shift ;;
         list-users) cmd="list-users"; shift ;;
         print-config) cmd="print-config"; shift ;;
+        preflight) cmd="preflight"; shift ;;
         uninstall) cmd="uninstall"; shift ;;
         -*) warn "Unknown flag: $1 (ignored)"; shift ;;
         *) cmd="${cmd:-default}"; shift ;;
@@ -818,6 +822,15 @@ main() {
             detect_os
             compute_network_values
             print_config
+            ;;
+        preflight)
+            # Package availability check only (apt-get update + apt-cache
+            # show); changes nothing. Exits non-zero with an explanation on
+            # a release that cannot provide strongswan-starter.
+            require_root
+            detect_os
+            ensure_l2tp_packages_available
+            log "Preflight OK: ${L2TP_PACKAGES[*]} available on ${DISTRO_ID} ${RELEASE} (${DISTRO_CODENAME})."
             ;;
         uninstall)
             uninstall
@@ -924,12 +937,35 @@ ensure_l2tp_packages_available() {
         err "Required package(s) not available on ${DISTRO_ID:-this system} ${RELEASE:-} (${DISTRO_CODENAME:-}): ${missing[*]}"
         if [[ " ${missing[*]} " == *" strongswan-starter "* ]]; then
             err "This tool writes the classic /etc/ipsec.conf, which only strongswan-starter can load."
-            if [[ "${DISTRO_ID:-}" == "ubuntu" ]]; then
-                err "On Ubuntu 26.04+ strongswan-starter is in 'universe': run 'add-apt-repository universe && apt-get update' and retry."
+            if [[ "${DISTRO_ID:-}" == "ubuntu" ]] && ! ubuntu_universe_enabled; then
+                err "The Ubuntu 'universe' component is NOT enabled in your apt sources."
+                err "On Ubuntu 26.04 strongswan-starter is only in 'universe'. Enable it and retry:"
+                err "    add-apt-repository universe && apt-get update"
+            else
+                err "strongswan-starter is not offered by any enabled apt source on this release,"
+                err "so this release is not supported by l2tp.sh (see the README support table)."
             fi
         fi
         die "Stopping before any change. See README (L2TP/IPsec supported OS table)."
     fi
+    local starter_policy
+    starter_policy="$(apt-cache policy strongswan-starter 2>/dev/null || true)"
+    if [[ "${DISTRO_ID:-}" == "ubuntu" ]] \
+            && grep -qE '[^[:space:]]+/universe[[:space:]]' <<<"$starter_policy"; then
+        info "Note: strongswan-starter comes from Ubuntu 'universe' on this release (community-maintained)."
+    fi
+}
+
+ubuntu_universe_enabled() {
+    # True when any enabled apt source serves the `universe` component.
+    # `apt-cache policy` (no args) lists every index apt actually uses,
+    # e.g. " 500 http://archive.ubuntu.com/ubuntu resolute/universe amd64
+    # Packages", so this covers both sources.list and deb822 .sources.
+    # Captured first: `apt-cache ... | grep -q` under pipefail can report
+    # failure when grep exits early and apt-cache gets SIGPIPE.
+    local pol
+    pol="$(apt-cache policy 2>/dev/null || true)"
+    grep -qE '[^[:space:]]+/universe[[:space:]]' <<<"$pol"
 }
 
 main

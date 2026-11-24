@@ -27,8 +27,10 @@
 #       print-config | uninstall
 #     Non-interactive flags/env vars:
 #       --auto                       accept every default, no prompts
-#       --name <n>                   tunnel name (default gre1 / greN; gre0 is
-#                                    reserved by the kernel and rejected)
+#       --name <n>                   tunnel name, 1..15 chars [A-Za-z0-9_-]
+#                                    (default vgre0 / vgreN). gre0, gretap0
+#                                    and erspan0 are the kernel's ip_gre
+#                                    fallback devices and are rejected.
 #       --local <ip>                 local public IP (auto-detected default)
 #       --remote <ip>                remote public IP (required, validated)
 #       --inner-subnet <cidr>        /30 inner pair parent, default
@@ -51,8 +53,14 @@
 #
 # Verification notes (clean-room; source: ip-link(8) from the iproute2
 # man page at man7.org, plus /etc/protocols and the kernel docs):
-#   * `ip link add <n> type gre remote <A> local <B> [ i|o key K ] [ ttl T ]`
-#     -- exact option spellings verified from ip-link(8) "GRE Type Support".
+#   * `ip link add <n> mtu <M> type gre local <B> remote <A> [ ikey K okey K ]
+#     [ ttl T ]` -- ip-link(8) SYNOPSIS: link options such as `[ mtu MTU ]`
+#     come BEFORE `type TYPE [ ARGS ]`; everything after `type gre` goes to
+#     the GRE parser ("GRE Type Support": remote/local/[i|o]key/ttl), which
+#     rejects `mtu`.
+#   * Interface names: at most 15 characters (IFNAMSIZ 16 incl. NUL).
+#   * gre0 / gretap0 / erspan0 are created by the kernel in every netns as
+#     soon as ip_gre is loaded, so they can never be ours.
 #   * P2P addressing: `ip addr add <local>/30 peer <remote> dev <n>`
 #     (ip-address(8): the `peer` form carries the prefix).
 #   * GRE is IP protocol 47 (from /etc/protocols). iptables accepts
@@ -207,10 +215,20 @@ ask_yes_no() {
 # Each file holds the full parameter set so `add` is idempotent and the
 # peer-command generator can re-derive the exact commands.
 
+live_gre_links() {
+    # Names of live GRE (kind "gre") links, minus the kernel fallback
+    # devices. Filtered by link type, not by name: tunnel names are
+    # free-form (default vgreN), so a '^gre' name filter would miss them.
+    ip -o link show type gre 2>/dev/null \
+        | awk -F': ' '{print $2}' | awk '{print $1}' | cut -d@ -f1 \
+        | grep -vxE 'gre0|gretap0|erspan0' || true
+}
+
 next_name() {
-    # Start at gre1: gre0 is the kernel's fallback device, auto-created in
-    # every netns as soon as ip_gre is loaded; `ip link add gre0` fails.
-    local n=1 base="gre"
+    # Default names are vgre0, vgre1, ...: NOT greN, because gre0 is the
+    # kernel's ip_gre fallback device (auto-created in every netns as soon
+    # as ip_gre is loaded), so `ip link add gre0` always fails.
+    local n=0 base="vgre"
     while [[ -e "$CONF_DIR/${base}${n}.conf" ]] || ip link show "${base}${n}" >/dev/null 2>&1; do
         n=$((n + 1))
     done
@@ -298,7 +316,7 @@ compute_inner_pair() {
     fi
     # Mark currently-up links.
     local link
-    for link in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | cut -d@ -f1 | grep -E '^gre' | grep -vxE 'gre0|gretap0|erspan0' || true); do
+    for link in $(live_gre_links); do
         local addr
         addr="$(ip -4 addr show "$link" 2>/dev/null | awk '/inet /{print $2}' | head -n1 || true)"
         [[ -n "$addr" ]] && used["${addr%/*}"]=1
@@ -627,7 +645,7 @@ list_tunnels() {
         done
     fi
     local live
-    for live in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | cut -d@ -f1 | grep -E '^gre' | grep -vxE 'gre0|gretap0|erspan0'); do
+    for live in $(live_gre_links); do
         echo "  $live  (live on this host)"
         shown=1
     done
@@ -641,7 +659,7 @@ status() {
     if [[ -n "$name" ]]; then
         load_tunnel_file "$name" 2>/dev/null || { warn "No config for '$name'"; return 0; }
     fi
-    for n in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | cut -d@ -f1 | grep -E '^gre' | grep -vxE 'gre0|gretap0|erspan0' || true); do
+    for n in $(live_gre_links); do
         echo
         echo "Tunnel: $n"
         ip -s link show "$n" 2>/dev/null | sed 's/^/    /'
@@ -717,7 +735,7 @@ uninstall() {
         done
     fi
     local live
-    for live in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | cut -d@ -f1 | grep -E '^gre' | grep -vxE 'gre0|gretap0|erspan0'); do
+    for live in $(live_gre_links); do
         # Avoid duplicates.
         local seen=0
         local n
@@ -793,11 +811,11 @@ done
 
 # Validate inputs for any command that touches the network.
 validate_inputs() {
-    [[ -n "$NAME" ]] || NAME="${GRE_TUNNEL_NAME:-gre1}"
-    [[ "$NAME" =~ ^[A-Za-z0-9_-]{1,15}$ ]] || die "Tunnel name must be 1..15 chars [A-Za-z0-9_-] (iproute2)."
+    [[ -n "$NAME" ]] || NAME="${GRE_TUNNEL_NAME:-$(next_name)}"
+    [[ "$NAME" =~ ^[A-Za-z0-9_-]{1,15}$ ]] || die "Tunnel name '$NAME' is invalid: must be 1..15 chars [A-Za-z0-9_-] (Linux IFNAMSIZ limit)."
     case "$NAME" in
         gre0|gretap0|erspan0)
-            die "'$NAME' is reserved by the kernel (ip_gre fallback device). Use another name, e.g. gre1." ;;
+            die "'$NAME' is reserved: the kernel creates it automatically as the ip_gre fallback device, so it cannot be used as a tunnel name. Use another name, e.g. vgre0." ;;
     esac
     [[ -n "$LOCAL_IP" ]] || LOCAL_IP="${GRE_LOCAL_IP:-$(public_ip)}"
     validate_ipv4 "$LOCAL_IP" || die "Bad local IP."

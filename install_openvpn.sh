@@ -99,7 +99,7 @@ tmp_installer="$(mktemp "${TMPDIR:-/tmp}/openvpn-install.XXXXXX")"
 trap cleanup EXIT
 
 echo "Downloading OpenVPN installer (commit ${REF:0:7})..." >&2
-if ! curl -fsSL --retry 3 -o "$tmp_installer" "$UPSTREAM_URL"; then
+if ! curl -fsSL --max-time 60 --retry 3 -o "$tmp_installer" "$UPSTREAM_URL"; then
     echo "Error: failed to download OpenVPN installer from $UPSTREAM_URL" >&2
     exit 1
 fi

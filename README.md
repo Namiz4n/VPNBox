@@ -62,7 +62,7 @@ Everything lives in this repo. No external toolchains beyond stock `apt`. Each i
 Prerequisites: a fresh **root** shell on **Debian** or **Ubuntu**.
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/Namiz4n/VPNBox/refs/heads/main/main.sh)
+sudo bash <(curl -Ls --max-time 60 --retry 3 https://raw.githubusercontent.com/Namiz4n/VPNBox/refs/heads/main/main.sh)
 ```
 
 Pick a menu item. Each tool can also be run standalone:
@@ -79,7 +79,7 @@ Run a tool with **no arguments** to hit the guided wizard (or the management men
 Override which ref the bootstrap fetches from:
 
 ```bash
-VPN_INSTALL_REF=my-topic-branch sudo bash <(curl -Ls https://raw.githubusercontent.com/Namiz4n/VPNBox/refs/heads/main/main.sh)
+VPN_INSTALL_REF=my-topic-branch sudo bash <(curl -Ls --max-time 60 --retry 3 https://raw.githubusercontent.com/Namiz4n/VPNBox/refs/heads/main/main.sh)
 ```
 
 ---
@@ -129,15 +129,17 @@ Generates `ipsec.conf` / `ipsec.secrets` (strongSwan, classic stroke format) and
 
 The classic `ipsec.conf` is only read by `starter` from the **`strongswan-starter`** package, so the tool installs `strongswan-starter strongswan-charon xl2tpd ppp` explicitly and checks each with `apt-cache show` first; if one is missing it stops before changing anything. The `strongswan` metapackage is not enough on newer releases: there it resolves to `charon-systemd` + `strongswan-swanctl` and installs no starter.
 
-**Supported OS for `l2tp.sh`** (checked against the official `Packages` indexes, amd64, November 2026):
+**Supported OS for `l2tp.sh`** — every row is **unverified** until the `l2tp-os-matrix` CI job (official Docker image per release: `apt-get update`, `apt-cache policy`, `apt-cache depends strongswan`, explicit install, real `starter` + `xl2tpd` validation) has passed for it:
 
-| Release | `strongswan-starter` | Component | `strongswan` metapackage pulls in starter? | `l2tp.sh` |
-|---------|----------------------|-----------|---------------------------------------------|-----------|
-| Ubuntu 22.04 (jammy) | 5.9.5-2ubuntu2.8 | main | Yes (`Depends: strongswan-charon, strongswan-starter`) | Supported |
-| Ubuntu 24.04 (noble) | 5.9.13-2ubuntu4.24.04.5 | main | Yes (`Depends: strongswan-charon, strongswan-starter`) | Supported |
-| Ubuntu 26.04 (resolute, newest LTS) | 6.0.4-1ubuntu3.2 | **universe** | No (`charon-systemd \| strongswan-charon, strongswan-swanctl \| strongswan-starter`) | Supported with `universe` on (default on stock images); explicit install required |
-| Debian 12 (bookworm) | 5.9.8-5+deb12u5 | main | Yes (`strongswan-charon`, `strongswan-starter`) | Supported |
-| Debian 13 (trixie) | 6.0.1-6+deb13u7 | main | No (alternatives incl. `charon-systemd`, `strongswan-swanctl`) | Supported; explicit install required |
+| Release | `strongswan-starter` | Component | `strongswan` metapackage pulls in starter? | `l2tp.sh` | Verified |
+|---------|----------------------|-----------|---------------------------------------------|-----------|----------|
+| Ubuntu 22.04 (jammy) | 5.9.5-2ubuntu2.8 | main | Yes | Supported | unverified |
+| Ubuntu 24.04 (noble) | 5.9.13-2ubuntu4.24.04.5 | main | Yes | Supported | unverified |
+| Ubuntu 26.04 (resolute) | 6.0.4-1ubuntu3.2 | **universe** | No (`strongswan-swanctl \| strongswan-starter`) | Supported with `universe` enabled; `l2tp.sh` installs starter explicitly and refuses with an explanation when `universe` is off | unverified |
+| Debian 12 (bookworm) | 5.9.8-5+deb12u5 | main | unverified | unverified | unverified |
+| Debian 13 (trixie) | 6.0.1-6+deb13u7 | main | unverified | unverified | unverified |
+
+Run `sudo bash tools/l2tp.sh preflight` to check a server before installing: it changes nothing and exits non-zero with an explanation if `strongswan-starter`, `strongswan-charon`, `xl2tpd` or `ppp` cannot be installed (including a disabled Ubuntu `universe`).
 
 strongSwan documents the stroke/`starter` interface as legacy. Moving to `swanctl.conf` is a TODO in the script header.
 
@@ -195,9 +197,10 @@ GitHub Actions validates every push / PR touching `.sh` or `.yml`:
 | `shellcheck` | Strict ShellCheck on all our scripts; error-only on `wireguard-install.sh` |
 | `config-test` | `ocserv --test-config` against the generated config |
 | `pptp-dryrun` | Structural greps on `pptp.sh print-config` output; apt-cache guard for 24.04+ |
-| `l2tp-validate` | Prints `/etc/os-release` + `apt-cache policy` for the strongSwan packages, installs `strongswan-starter` explicitly, feeds the generated configs to `starter --nofork` and `xl2tpd -D`; fails on parser errors or a missing starter binary (no fallback) |
-| `gre-dryrun` | Mirrored-inner-address assertion + outer-endpoint swap + MTU consistency |
-| `gre-functional` | End-to-end netns test: runs the `ip` commands from `print-config` in two namespaces (fails if any is rejected) and pings over `gre1` in both directions. Skipped only if the runner kernel cannot load `ip_gre`; a skip shows up as a `::warning::` and in the job summary, and does not count as a pass |
+| `l2tp-validate` | On the runner: `apt-cache policy`, explicit `strongswan-starter` install, then `.github/scripts/l2tp-validate.sh`: deliberately broken `ipsec.conf` / `xl2tpd.conf` must be rejected (proves the parsers run), then the generated configs go to `starter --nofork` and `xl2tpd -D`; fails on parser errors or a missing starter binary (no fallback) |
+| `l2tp-os-matrix` | One job per Docker image (`ubuntu:22.04`, `ubuntu:24.04`, `ubuntu:26.04`, `debian:12`, `debian:13`): `apt-get update`, `apt-cache policy strongswan strongswan-starter xl2tpd ppp`, `apt-cache depends strongswan`, explicit `strongswan-starter xl2tpd ppp` install (fails if impossible), `l2tp.sh preflight`, same validation script. On 26.04 it also disables `universe` and asserts that `l2tp.sh` refuses with an explanation. This job is the source of the README support table |
+| `gre-dryrun` | Keyword-based parse of the generated `ip` lines (word-order independent): mirrored inner addresses, swapped outer endpoints (checked against the expected IPs), identical MTU, `mtu` before `type gre`; `gre0`/`gretap0`/`erspan0`/over-long names rejected; default name `vgre0` |
+| `gre-functional` | End-to-end netns test: runs the `ip` commands from `print-config` in two namespaces under `set -euo pipefail` (fails if any is rejected) and pings over `vgre0` in both directions. Skipped only if the runner kernel cannot load `ip_gre`; a skip shows up as a `::warning::` and in the job summary, and does not count as a pass |
 | `gre-multiple` | Two independent tunnel pairs pick disjoint `/30` subnets (collision avoidance) |
 | `gre-ufw` | Adds the rule with the tool's `allow_gre_firewall`, removes it with the tool's `remove_gre_firewall` (the same function `remove` and `uninstall` use), and checks `ufw show added` after each step |
 

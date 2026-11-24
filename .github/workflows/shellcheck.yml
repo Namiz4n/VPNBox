@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Run ShellCheck on our own scripts (strict)
-        run: shellcheck main.sh install_openvpn.sh tools/*.sh
+        run: shellcheck main.sh install_openvpn.sh tools/*.sh .github/scripts/*.sh
 
       - name: Run ShellCheck on wireguard-install.sh (error only)
         run: shellcheck --severity=error wireguard-install.sh
@@ -42,6 +42,7 @@ jobs:
 
       - name: Validate generated ocserv config with ocserv --test-config
         run: |
+          set -euo pipefail
           bash tools/ocserv.sh print-config > /tmp/ocserv-test.conf
           echo "--- generated ocserv.conf ---"
           cat /tmp/ocserv-test.conf
@@ -75,6 +76,7 @@ jobs:
 
       - name: Check pptpd availability on this release
         run: |
+          set -euo pipefail
           bash tools/pptp.sh print-config | tee /tmp/pptp-dryrun.txt
           grep -q 'option /etc/ppp/pptpd-options' /tmp/pptp-dryrun.txt \
             || { echo "::error::pptpd.conf missing the option directive"; exit 1; }
@@ -101,117 +103,163 @@ jobs:
 
       - name: Report OS + strongSwan package policy
         run: |
+          set -euo pipefail
           echo "=== /etc/os-release ==="
           cat /etc/os-release
           sudo apt-get update
           echo "=== apt-cache policy ==="
-          apt-cache policy strongswan-starter strongswan-swanctl charon-systemd
+          apt-cache policy strongswan strongswan-starter strongswan-swanctl charon-systemd xl2tpd ppp
 
       - name: Install strongswan-starter (explicit) + xl2tpd + ppp
         run: |
-          set -eo pipefail
+          set -euo pipefail
           # Same package set as tools/l2tp.sh (L2TP_PACKAGES). Do NOT rely on
           # the `strongswan` metapackage: on Ubuntu 26.04 it resolves to
           # charon-systemd + swanctl and installs no starter.
           sudo apt-get install -y strongswan-starter strongswan-charon xl2tpd ppp
           echo "=== installed strongSwan packages ==="
-          dpkg -l 'strongswan*' 'charon*' | awk '/^ii/{print $2, $3}'
-          echo "=== strongswan-starter file list (binaries) ==="
-          dpkg -L strongswan-starter | grep -E '/(starter|ipsec)$' || true
+          dpkg-query -W -f='${Package} ${Version} ${db:Status-Abbrev}\n' 'strongswan*' 'charon*' 2>/dev/null \
+              | awk '$3 ~ /^ii/ {print $1, $2}' || true
 
-      - name: Generate and validate L2TP configs
+      - name: Validate generated configs with the real starter + xl2tpd
+        run: bash .github/scripts/l2tp-validate.sh
+
+  l2tp-os-matrix:
+    # Authoritative package/support check for the README table. Each release
+    # runs in its official Docker image, so the result comes from that
+    # release's own apt indexes (no ad-hoc Packages downloads, no curl).
+    name: L2TP OS matrix (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'ubuntu:26.04', 'debian:12', 'debian:13']
+    container:
+      image: ${{ matrix.image }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      ROW: /tmp/l2tp-matrix-row.env
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: apt-get update, apt-cache policy, apt-cache depends strongswan
+        id: policy
         run: |
-          set -uo pipefail
-          bash tools/l2tp.sh print-config \
-            --public-ip 203.0.113.9 \
-            --psk 'TestPSK123456789012345' \
-            > /tmp/l2tp-dryrun.txt
-          echo "--- generated L2TP configs ---"
-          cat /tmp/l2tp-dryrun.txt
+          set -euo pipefail
+          . /etc/os-release
+          echo "=== ${PRETTY_NAME} (${VERSION_CODENAME:-?}) ==="
+          apt-get update
+          echo "=== apt-cache policy strongswan strongswan-starter xl2tpd ppp ==="
+          apt-cache policy strongswan strongswan-starter xl2tpd ppp
+          echo "=== apt-cache depends strongswan ==="
+          apt-cache depends strongswan
 
-          awk '/^--- \/etc\/ipsec\.conf$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
-              | sudo tee /etc/ipsec.conf >/dev/null
-          awk '/^--- \/etc\/ipsec\.secrets$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
-              | sudo tee /etc/ipsec.secrets >/dev/null
-          sudo chmod 640 /etc/ipsec.secrets
-          awk '/^--- \/etc\/xl2tpd\/xl2tpd\.conf$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
-              | sudo tee /etc/xl2tpd/xl2tpd.conf >/dev/null
-          awk '/^--- \/etc\/ppp\/options\.xl2tpd$/{f=1;next} /^--- /{f=0} f{print}' /tmp/l2tp-dryrun.txt \
-              | sudo tee /etc/ppp/options.xl2tpd >/dev/null
-
-          # The packaged strongSwan service can auto-start on install/daemon-reload,
-          # which makes our manual `starter --nofork` fail with "already running".
-          # Stop/disable any such service so we own the XFRM stack during this test.
-          sudo systemctl stop strongswan-starter strongswan xl2tpd 2>/dev/null || true
-          sudo systemctl disable strongswan-starter strongswan xl2tpd 2>/dev/null || true
-          sudo pkill charon 2>/dev/null || true
-          sudo ip xfrm state flush 2>/dev/null || true
-          sudo ip xfrm policy flush 2>/dev/null || true
-
-          # Locate the starter binary shipped by strongswan-starter. There is
-          # NO fallback: without starter nothing parses ipsec.conf, so a
-          # missing binary is a hard failure, not a pass.
-          STARTER_PATH=""
-          for _cand in /usr/lib/ipsec/starter /usr/libexec/ipsec/starter \
-                       /usr/sbin/starter /usr/lib/strongswan/starter \
-                       /usr/libexec/strongswan/starter; do
-            if sudo test -x "$_cand"; then
-              STARTER_PATH="$_cand"
-              break
-            fi
-          done
-          if [[ -z "$STARTER_PATH" ]]; then
-            STARTER_PATH="$(dpkg -L strongswan-starter 2>/dev/null | grep -E '/starter$' | head -n1 || true)"
+          # candidate VERSION and its archive/component for package $1.
+          cand_of() {
+            apt-cache policy "$1" | awk '/Candidate:/ {print $2; exit}'
+          }
+          comp_of() {
+            local c="$2"
+            apt-cache policy "$1" | awk -v c="$c" '
+              /Version table:/ { t = 1; next }
+              t && ($1 == c || ($1 == "***" && $2 == c)) { g = 1; next }
+              g && /:\/\// { print $3; exit }'
+          }
+          ss_cand="$(cand_of strongswan)"
+          st_cand="$(cand_of strongswan-starter)"
+          st_comp="(none)"
+          [[ "$st_cand" == "(none)" || -z "$st_cand" ]] || st_comp="$(comp_of strongswan-starter "$st_cand")"
+          ss_dep="(strongswan not available)"
+          if [[ -n "$ss_cand" && "$ss_cand" != "(none)" ]]; then
+            ss_show="$(apt-cache show "strongswan=${ss_cand}")"
+            ss_dep="$(awk '/^Depends: / {sub(/^Depends: /, ""); print; exit}' <<<"$ss_show")"
           fi
-          if [[ -z "$STARTER_PATH" ]] || ! sudo test -x "$STARTER_PATH"; then
-            echo "::error::strongSwan starter binary not found after installing strongswan-starter; ipsec.conf cannot be validated."
-            dpkg -L strongswan-starter 2>&1 | head -40 || true
-            exit 1
-          fi
-          echo "[l2tp] using starter: $STARTER_PATH"
+          # Does installing ONLY the metapackage (apt defaults) pull in
+          # strongswan-starter? Answered by apt's own resolver (simulation).
+          sim="$(apt-get install -s strongswan 2>&1 || true)"
+          if grep -qE '^Inst strongswan-starter( |$)' <<<"$sim"; then meta=Yes; else meta=No; fi
+          echo "=== apt-get install -s strongswan: strongSwan/charon packages it would install ==="
+          grep -E '^Inst (strongswan|charon|libcharon|libstrongswan)' <<<"$sim" || echo "(none)"
+          {
+            echo "OS_NAME='${PRETTY_NAME}'"
+            echo "ST_CAND='${st_cand}'"
+            echo "ST_COMP='${st_comp}'"
+            echo "SS_DEP='${ss_dep}'"
+            echo "META='${meta}'"
+          } > "$ROW"
+          echo "MATRIX ${{ matrix.image }}: strongswan-starter=${st_cand} [${st_comp}]  metapackage-pulls-starter=${meta}"
+          echo "MATRIX ${{ matrix.image }}: strongswan Depends: ${ss_dep}"
 
-          echo "=== strongSwan starter output ==="
+      - name: "ubuntu:26.04 only: l2tp.sh refuses politely when universe is off"
+        if: matrix.image == 'ubuntu:26.04'
+        run: |
+          set -euo pipefail
+          # Must run BEFORE strongswan-starter is installed: an installed
+          # package stays visible to apt-cache via the dpkg status file.
+          src=/etc/apt/sources.list.d/ubuntu.sources
+          [[ -f "$src" ]] || { echo "::error::$src not found; cannot toggle universe"; ls -la /etc/apt/sources.list.d; exit 1; }
+          cp "$src" /tmp/ubuntu.sources.bak
+          sed -i -E '/^Components:/s/[[:space:]]+universe\b//' "$src"
+          grep -E '^Components:' "$src"
+          if grep -E '^Components:' "$src" | grep -qw universe; then
+            echo "::error::could not remove universe from $src"; exit 1
+          fi
           rc=0
-          # starter --nofork stays in the foreground: 124 (timeout) = it parsed
-          # the config and kept running. Other non-zero exits are runtime /
-          # environment issues (XFRM, netlink, already running) -> warning.
-          # Only parser messages decide config validity.
-          starter_out="$(timeout 10 sudo "$STARTER_PATH" --nofork 2>&1)" || rc=$?
-          echo "$starter_out"
-          echo "[l2tp] starter exit code: $rc"
-          if [[ "$rc" -eq 124 ]]; then
-            echo "strongSwan starter ran for 10s (config loaded, daemon kept running)."
-          elif [[ "$rc" -eq 0 ]]; then
-            echo "strongSwan starter exited cleanly."
-          elif [[ "$rc" -eq 126 || "$rc" -eq 127 ]]; then
-            echo "::error::strongSwan starter could not be executed (exit $rc)"
-            exit 1
-          else
-            echo "::warning::strongSwan starter returned exit $rc (runtime/environment issue, not a config bug)"
-          fi
-          if echo "$starter_out" | grep -iqE 'unknown keyword|parsing error|syntax error'; then
-            echo "::error::strongSwan starter reported parsing errors"
-            exit 1
-          fi
-          if ! echo "$starter_out" | grep -qiE 'loading config setup|loading conn'; then
-            echo "::warning::starter output has no 'loading config setup'/'loading conn' lines; check the log above."
-          fi
-          sudo pkill -f "$STARTER_PATH" 2>/dev/null || true
-          sudo pkill charon 2>/dev/null || true
-          echo "strongSwan starter: no parser errors in ipsec.conf."
+          out="$(bash tools/l2tp.sh preflight 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          echo "[l2tp] preflight exit code without universe: $rc"
+          [[ "$rc" -ne 0 ]] \
+              || { echo "::error::l2tp.sh preflight succeeded without universe (expected a refusal)"; exit 1; }
+          grep -q "'universe' component is NOT enabled" <<<"$out" \
+              || { echo "::error::refusal does not explain that universe is disabled"; exit 1; }
+          grep -q 'add-apt-repository universe' <<<"$out" \
+              || { echo "::error::refusal does not tell the user how to enable universe"; exit 1; }
+          cp /tmp/ubuntu.sources.bak "$src"
+          apt-get update
+          echo "[l2tp] universe-off refusal: OK (non-zero exit + clear explanation); universe restored."
 
-          echo "=== xl2tpd startup check ==="
-          sudo rm -f /var/run/xl2tpd/l2tp-control
-          sudo mkdir -p /var/run/xl2tpd
-          xl2tpd_out="$(timeout 3 xl2tpd -D -c /etc/xl2tpd/xl2tpd.conf -C /var/run/xl2tpd/l2tp-control 2>&1 || true)"
-          echo "${xl2tpd_out:-(no output)}"
-          if echo "${xl2tpd_out:-}" | grep -iqE 'parse_config:|Unable to load config file'; then
-            echo "::error::xl2tpd rejected the generated config"
+      - name: Install strongswan-starter xl2tpd ppp (explicit)
+        id: install
+        run: |
+          set -euo pipefail
+          # Explicit package list = tools/l2tp.sh L2TP_PACKAGES; iproute2 and
+          # procps are test-harness tools (ip xfrm, pkill).
+          if ! apt-get install -y strongswan-starter strongswan-charon xl2tpd ppp iproute2 procps; then
+            echo "::error::${{ matrix.image }}: cannot install strongswan-starter/xl2tpd/ppp. If this release genuinely lacks strongswan-starter, mark it unsupported in README and keep l2tp.sh refusing there."
             exit 1
           fi
-          echo "xl2tpd startup: OK (no parse_config / Unable-to-load errors)."
+          dpkg-query -W -f='${Package} ${Version}\n' strongswan-starter strongswan-charon xl2tpd ppp
 
-          echo "L2TP/IPsec config validated by real strongSwan + xl2tpd."
+      - name: tools/l2tp.sh preflight (must accept this release)
+        id: preflight
+        run: bash tools/l2tp.sh preflight
+
+      - name: Validate generated configs with the real starter + xl2tpd
+        id: validate
+        run: bash .github/scripts/l2tp-validate.sh
+
+      - name: Matrix result
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -f "$ROW" ]]; then
+            # shellcheck disable=SC1090
+            . "$ROW"
+          fi
+          line="| ${{ matrix.image }} | ${OS_NAME:-?} | ${ST_CAND:-?} | ${ST_COMP:-?} | ${META:-?} | install: ${{ steps.install.outcome }} / preflight: ${{ steps.preflight.outcome }} / validate: ${{ steps.validate.outcome }} |"
+          echo "MATRIX-RESULT $line"
+          echo "MATRIX-DEPENDS ${{ matrix.image }}: ${SS_DEP:-?}"
+          {
+            echo "| image | OS | strongswan-starter | archive/component | metapackage pulls starter? | steps |"
+            echo "|---|---|---|---|---|---|"
+            echo "$line"
+            echo ""
+            echo "\`strongswan\` Depends: \`${SS_DEP:-?}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   gre-dryrun:
     name: GRE dry-run + mirrored-address check
@@ -222,10 +270,10 @@ jobs:
 
       - name: Build side A and side B configs (both via print-config)
         run: |
-          set -uo pipefail
+          set -euo pipefail
           SIDES_DIR="$(mktemp -d)"
           bash tools/gre.sh print-config \
-            --name gre1 \
+            --name vgre0 \
             --local 203.0.113.1 \
             --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 \
@@ -233,7 +281,7 @@ jobs:
           # Side B uses the same generator with swapped outer endpoints;
           # this avoids eval'ing the peer `add` command which requires root.
           bash tools/gre.sh print-config \
-            --name gre1 \
+            --name vgre0 \
             --local 203.0.113.2 \
             --remote 203.0.113.1 \
             --inner-subnet 10.10.0.0/24 \
@@ -243,14 +291,29 @@ jobs:
           echo "--- side B ---"
           cat "$SIDES_DIR/sideB.txt"
 
-          a_local_inner="$(grep '^ip addr add' "$SIDES_DIR/sideA.txt" \
-              | awk '{print $4}' | cut -d/ -f1 || true)"
-          a_remote_inner="$(grep '^ip addr add' "$SIDES_DIR/sideA.txt" \
-              | awk '{print $6}' || true)"
-          b_local_inner="$(grep '^ip addr add' "$SIDES_DIR/sideB.txt" \
-              | awk '{print $4}' | cut -d/ -f1 || true)"
-          b_remote_inner="$(grep '^ip addr add' "$SIDES_DIR/sideB.txt" \
-              | awk '{print $6}' || true)"
+          # arg_after KEYWORD PREFIX FILE: the token right after KEYWORD on
+          # the single line of FILE starting with PREFIX. Keyword-based, so
+          # it does not depend on word order (moving `mtu` before `type gre`
+          # broke the old position/sed-based parser). Fails loudly when the
+          # line or the keyword is missing instead of yielding "".
+          arg_after() {
+            local kw="$1" prefix="$2" file="$3" n val
+            n="$(grep -c "^${prefix} " "$file" || true)"
+            [[ "$n" -eq 1 ]] || {
+              echo "::error::expected exactly one '${prefix}' line in ${file##*/}, got ${n}" >&2; return 1; }
+            val="$(grep "^${prefix} " "$file" \
+              | awk -v k="$kw" '{ for (i = 3; i < NF; i++) if ($i == k) { print $(i + 1); exit } }')"
+            [[ -n "$val" ]] || {
+              echo "::error::no '${kw}' option on the '${prefix}' line of ${file##*/}" >&2; return 1; }
+            printf '%s\n' "$val"
+          }
+
+          a_local_inner="$(arg_after add  'ip addr add' "$SIDES_DIR/sideA.txt")"
+          a_local_inner="${a_local_inner%/*}"
+          a_remote_inner="$(arg_after peer 'ip addr add' "$SIDES_DIR/sideA.txt")"
+          b_local_inner="$(arg_after add  'ip addr add' "$SIDES_DIR/sideB.txt")"
+          b_local_inner="${b_local_inner%/*}"
+          b_remote_inner="$(arg_after peer 'ip addr add' "$SIDES_DIR/sideB.txt")"
           echo "A inner: ${a_local_inner} <-> ${a_remote_inner}"
           echo "B inner: ${b_local_inner} <-> ${b_remote_inner}"
           [[ "$a_local_inner" == "$b_remote_inner" ]] \
@@ -258,35 +321,64 @@ jobs:
           [[ "$a_remote_inner" == "$b_local_inner" ]] \
               || { echo "::error::inner IPs are NOT mirrored (A remote != B local)"; exit 1; }
 
-          a_outer_local="$(grep '^ip link add' "$SIDES_DIR/sideA.txt" \
-              | sed -n 's/.*local \([^ ]*\) remote.*/\1/p' || true)"
-          a_outer_remote="$(grep '^ip link add' "$SIDES_DIR/sideA.txt" \
-              | sed -n 's/.*remote \([^ ]*\) .*/\1/p' || true)"
-          b_outer_local="$(grep '^ip link add' "$SIDES_DIR/sideB.txt" \
-              | sed -n 's/.*local \([^ ]*\) remote.*/\1/p' || true)"
-          b_outer_remote="$(grep '^ip link add' "$SIDES_DIR/sideB.txt" \
-              | sed -n 's/.*remote \([^ ]*\) .*/\1/p' || true)"
+          a_outer_local="$(arg_after local  'ip link add' "$SIDES_DIR/sideA.txt")"
+          a_outer_remote="$(arg_after remote 'ip link add' "$SIDES_DIR/sideA.txt")"
+          b_outer_local="$(arg_after local  'ip link add' "$SIDES_DIR/sideB.txt")"
+          b_outer_remote="$(arg_after remote 'ip link add' "$SIDES_DIR/sideB.txt")"
           echo "A outer: ${a_outer_local} -> ${a_outer_remote}"
           echo "B outer: ${b_outer_local} -> ${b_outer_remote}"
-          [[ "$a_outer_local" == "$b_outer_remote" ]] \
-              || { echo "::error::outer local IPs do not match"; exit 1; }
-          [[ "$a_outer_remote" == "$b_outer_local" ]] \
-              || { echo "::error::outer remote IPs do not match"; exit 1; }
+          # Absolute values, not just A==B: a parser returning the same
+          # wrong token on both sides must not pass.
+          [[ "$a_outer_local" == 203.0.113.1 && "$a_outer_remote" == 203.0.113.2 ]] \
+              || { echo "::error::side A outer endpoints wrong: ${a_outer_local} -> ${a_outer_remote}"; exit 1; }
+          [[ "$b_outer_local" == 203.0.113.2 && "$b_outer_remote" == 203.0.113.1 ]] \
+              || { echo "::error::side B outer endpoints wrong: ${b_outer_local} -> ${b_outer_remote}"; exit 1; }
 
-          a_mtu="$(grep '^ip link add' "$SIDES_DIR/sideA.txt" \
-              | sed -n 's/.*mtu \([0-9]*\).*/\1/p' || true)"
-          b_mtu="$(grep '^ip link add' "$SIDES_DIR/sideB.txt" \
-              | sed -n 's/.*mtu \([0-9]*\).*/\1/p' || true)"
-          [[ "$a_mtu" == "$b_mtu" ]] \
-              || { echo "::error::MTU mismatch: A=$a_mtu B=$b_mtu"; exit 1; }
+          a_mtu="$(arg_after mtu 'ip link add' "$SIDES_DIR/sideA.txt")"
+          b_mtu="$(arg_after mtu 'ip link add' "$SIDES_DIR/sideB.txt")"
+          echo "MTU: A=${a_mtu} B=${b_mtu}"
+          [[ "$a_mtu" =~ ^[0-9]+$ && "$a_mtu" == "$b_mtu" ]] \
+              || { echo "::error::MTU mismatch or not numeric: A=$a_mtu B=$b_mtu"; exit 1; }
 
-          grep -q 'gre-gre1.service' "$SIDES_DIR/sideA.txt" \
+          # Regression guard for the iproute2 syntax: link options (mtu)
+          # must precede `type gre`; after `type` the gre parser rejects mtu.
+          for side in sideA sideB; do
+            [[ "$(arg_after type 'ip link add' "$SIDES_DIR/$side.txt")" == gre ]] \
+                || { echo "::error::$side: ip link add is not 'type gre'"; exit 1; }
+            grep '^ip link add ' "$SIDES_DIR/$side.txt" | awk '
+              { for (i = 3; i <= NF; i++) { if ($i == "mtu") m = i; if ($i == "type") t = i } }
+              END { exit !(m && t && m < t) }' \
+                || { echo "::error::$side: 'mtu' must come before 'type gre' (ip-link(8) SYNOPSIS)"; exit 1; }
+          done
+          echo "ip link add word order: mtu before 'type gre' on both sides"
+
+          grep -q 'gre-vgre0.service' "$SIDES_DIR/sideA.txt" \
               || { echo "::error::systemd unit name missing from side A"; exit 1; }
-          grep -q 'gre-gre1.service' "$SIDES_DIR/sideB.txt" \
+          grep -q 'gre-vgre0.service' "$SIDES_DIR/sideB.txt" \
               || { echo "::error::systemd unit name missing from side B"; exit 1; }
 
-          echo "GRE dry-run PASSED: inner mirrors, outer swaps, MTU identical."
+          echo "GRE dry-run PASSED: inner mirrors, outer swaps, MTU identical, mtu before type."
           rm -rf "$SIDES_DIR"
+
+      - name: Reserved / over-long names rejected, default name is vgre0
+        run: |
+          set -euo pipefail
+          for bad in gre0 gretap0 erspan0 abcdefghijklmnop; do
+            if out="$(bash tools/gre.sh print-config --name "$bad" \
+                --local 203.0.113.1 --remote 203.0.113.2 2>&1)"; then
+              echo "::error::--name $bad was accepted"; printf '%s\n' "$out"; exit 1
+            fi
+            msg="$(printf '%s\n' "$out" | grep -m1 -iE 'reserved|invalid' || true)"
+            [[ -n "$msg" ]] \
+                || { echo "::error::--name $bad failed without a clear error"; printf '%s\n' "$out"; exit 1; }
+            echo "--name $bad rejected: $msg"
+          done
+          default_out="$(GRE_CONF_DIR="$(mktemp -d)" bash tools/gre.sh print-config \
+              --local 203.0.113.1 --remote 203.0.113.2)"
+          printf '%s\n' "$default_out" | grep '^ip link add '
+          printf '%s\n' "$default_out" | grep -q '^ip link add vgre0 ' \
+              || { echo "::error::default tunnel name is not vgre0"; exit 1; }
+          echo "default tunnel name: vgre0 OK"
 
   gre-functional:
     name: GRE functional test (netns + ping)
@@ -327,7 +419,7 @@ jobs:
       - name: Build a GRE tunnel across two netns and ping
         if: steps.gre-check.outputs.can_test == 'true'
         run: |
-          set -uo pipefail
+          set -euo pipefail
           SIDES_DIR="$(mktemp -d)"
           sudo ip netns add gre-test-a
           sudo ip netns add gre-test-b
@@ -343,7 +435,7 @@ jobs:
 
           # Side A: generate via print-config, run the emitted ip commands.
           bash tools/gre.sh print-config \
-            --name gre1 \
+            --name vgre0 \
             --local 203.0.113.1 \
             --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 \
@@ -354,12 +446,12 @@ jobs:
           # set -e inside: a rejected `ip` command must fail the job, not be
           # silently ignored (that is how the previous run hid a bad
           # `ip link add` line and then pinged via the kernel's gre0).
-          sudo ip netns exec gre-test-a bash -ec "$side_a_cmds" \
+          sudo ip netns exec gre-test-a bash -euo pipefail -c "$side_a_cmds" \
               || { echo "::error::side A ip commands failed"; exit 1; }
 
           # Side B: same generator with swapped outer endpoints.
           bash tools/gre.sh print-config \
-            --name gre1 \
+            --name vgre0 \
             --local 203.0.113.2 \
             --remote 203.0.113.1 \
             --inner-subnet 10.10.0.0/24 \
@@ -367,16 +459,16 @@ jobs:
           echo "--- side B ---"
           cat "$SIDES_DIR/sideB.txt"
           side_b_cmds="$(grep -E '^ip (link|addr)' "$SIDES_DIR/sideB.txt")"
-          sudo ip netns exec gre-test-b bash -ec "$side_b_cmds" \
+          sudo ip netns exec gre-test-b bash -euo pipefail -c "$side_b_cmds" \
               || { echo "::error::side B ip commands failed"; exit 1; }
-          echo "--- gre1 link details ---"
-          sudo ip netns exec gre-test-a ip -d link show gre1
-          sudo ip netns exec gre-test-b ip -d link show gre1
+          echo "--- vgre0 link details ---"
+          sudo ip netns exec gre-test-a ip -d link show vgre0
+          sudo ip netns exec gre-test-b ip -d link show vgre0
 
           # Verify symmetric inner addresses.
-          a_inner="$(sudo ip netns exec gre-test-a ip -4 addr show gre1 2>/dev/null \
+          a_inner="$(sudo ip netns exec gre-test-a ip -4 addr show vgre0 2>/dev/null \
               | awk '/inet /{print $2}' | head -n1 || true)"
-          b_inner="$(sudo ip netns exec gre-test-b ip -4 addr show gre1 2>/dev/null \
+          b_inner="$(sudo ip netns exec gre-test-b ip -4 addr show vgre0 2>/dev/null \
               | awk '/inet /{print $2}' | head -n1 || true)"
           echo "A inner: $a_inner"
           echo "B inner: $b_inner"
@@ -387,14 +479,14 @@ jobs:
 
           # Ping both directions.
           echo "--- ping A -> B ---"
-          if sudo ip netns exec gre-test-a ping -c 2 -W 2 -I gre1 "${b_inner%/*}"; then
+          if sudo ip netns exec gre-test-a ping -c 2 -W 2 -I vgre0 "${b_inner%/*}"; then
             echo "ping A->B: OK"
           else
             echo "::error::ping A->B failed"
             exit 1
           fi
           echo "--- ping B -> A ---"
-          if sudo ip netns exec gre-test-b ping -c 2 -W 2 -I gre1 "${a_inner%/*}"; then
+          if sudo ip netns exec gre-test-b ping -c 2 -W 2 -I vgre0 "${a_inner%/*}"; then
             echo "ping B->A: OK"
           else
             echo "::error::ping B->A failed"
@@ -405,7 +497,7 @@ jobs:
           sudo ip netns del gre-test-a 2>/dev/null || true
           sudo ip netns del gre-test-b 2>/dev/null || true
           echo "GRE functional test PASSED."
-          echo "### GRE functional test: RAN and PASSED (ping A<->B over gre1)" >> "$GITHUB_STEP_SUMMARY"
+          echo "### GRE functional test: RAN and PASSED (ping A<->B over vgre0)" >> "$GITHUB_STEP_SUMMARY"
           rm -rf "$SIDES_DIR"
 
   gre-multiple:
@@ -417,22 +509,22 @@ jobs:
 
       - name: Two independent pairs must pick disjoint /30s
         run: |
-          set -uo pipefail
+          set -euo pipefail
           D1="$(mktemp -d)"
           D2="$(mktemp -d)"
           # Use a shared temp CONF_DIR so collision detection works across invocations.
           TEMP_CONF="$(mktemp -d)"
           export GRE_CONF_DIR="$TEMP_CONF"
           bash tools/gre.sh print-config \
-            --name gre1 --local 203.0.113.1 --remote 203.0.113.2 \
+            --name vgre0 --local 203.0.113.1 --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 > "$D1/a.txt"
           # Side B via print-config (not eval) to avoid root requirement
           bash tools/gre.sh print-config \
-            --name gre1 --local 203.0.113.2 --remote 203.0.113.1 \
+            --name vgre0 --local 203.0.113.2 --remote 203.0.113.1 \
             --inner-subnet 10.10.0.0/24 > "$D1/b.txt"
-          # Simulate gre1 being installed: write its config so gre2 sees it.
+          # Simulate vgre0 being installed: write its config so vgre1 sees it.
           printf '%s\n' \
-            'NAME=gre1' \
+            'NAME=vgre0' \
             'LOCAL_IP=203.0.113.1' \
             'REMOTE_IP=203.0.113.2' \
             'INNER_SUBNET=10.10.0.0/24' \
@@ -442,12 +534,12 @@ jobs:
             'GRE_TTL=' \
             'MTU=1476' \
             'FORWARDING=1' \
-            > "$TEMP_CONF/gre1.conf"
+            > "$TEMP_CONF/vgre0.conf"
           bash tools/gre.sh print-config \
-            --name gre2 --local 203.0.114.1 --remote 203.0.114.2 \
+            --name vgre1 --local 203.0.114.1 --remote 203.0.114.2 \
             --inner-subnet 10.10.0.0/24 > "$D2/a.txt"
           bash tools/gre.sh print-config \
-            --name gre2 --local 203.0.114.2 --remote 203.0.114.1 \
+            --name vgre1 --local 203.0.114.2 --remote 203.0.114.1 \
             --inner-subnet 10.10.0.0/24 > "$D2/b.txt"
 
           inner1_a="$(grep '^ip addr add' "$D1/a.txt" | awk '{print $4}' | cut -d/ -f1)"
@@ -475,7 +567,7 @@ jobs:
 
       - name: Install + bootstrap ufw for test harness
         run: |
-          set -eo pipefail
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y ufw
           # Reset is required because GitHub Actions caches `/etc/ufw`
@@ -492,15 +584,15 @@ jobs:
 
       - name: Exercise gre.sh allow_gre_firewall + remove_gre_firewall (one sudo pass)
         run: |
-          set -eo pipefail
+          set -euo pipefail
           REMOTE="203.0.113.9"
           GWS="$GITHUB_WORKSPACE"
-          sudo ip link del gre1 2>/dev/null || true   # ensure clean slate
+          sudo ip link del vgre0 2>/dev/null || true   # ensure clean slate
           # Write the test harness to a temp file on the runner so sudo bash can
           # source it cleanly without having to dodge bash -c quoting layers.
           cat > /tmp/_gre_ufw_test.sh <<'INNER'
             #!/usr/bin/env bash
-            set -eo pipefail
+            set -euo pipefail
             REMOTE="${1:-203.0.113.9}"
             GWS="${2:-.}"
             REMOTE_IP="$REMOTE"
@@ -546,8 +638,8 @@ jobs:
       - name: Clean up gre state after test
         if: always()
         run: |
-          set -eo pipefail
+          set -euo pipefail
           sudo rm -rf /etc/gre-tunnels
-          sudo rm -f /etc/systemd/system/gre-gre*.service
+          sudo rm -f /etc/systemd/system/gre-*.service
           sudo systemctl daemon-reload 2>/dev/null || true
           sudo rm -f /etc/sysctl.d/90-gre.conf /etc/modules-load.d/gre.conf

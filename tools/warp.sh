@@ -79,7 +79,7 @@ install_deb_repo() {
     apt-get -yqq update
     apt-get -yqq install ca-certificates curl
     # Cloudflare's official GPG key and apt source
-    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output "$KEYRING"
+    curl -fsSL --max-time 60 --retry 3 https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output "$KEYRING"
     # Detect the distro codename for the apt source line.
     local codename
     if codename="$(lsb_release -cs 2>/dev/null)" && [[ -n "$codename" ]]; then
@@ -102,7 +102,7 @@ install_deb_repo() {
 
 install_rpm_repo() {
     # Cloudflare's RPM repo file (single source for both dnf and yum)
-    curl -fsSL https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo \
+    curl -fsSL --max-time 60 --retry 3 https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo \
         -o /etc/yum.repos.d/cloudflare-warp.repo
     if [[ "$PKG_MGR" == "dnf" ]]; then
         dnf -y install cloudflare-warp

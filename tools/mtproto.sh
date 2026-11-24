@@ -143,7 +143,7 @@ install_binary() {
     trap 'rm -f "$tmp" "$extracted" 2>/dev/null' EXIT
     local extracted=""
 
-    if ! curl -fsSL --retry 3 -o "$tmp" "$url"; then
+    if ! curl -fsSL --max-time 60 --retry 3 -o "$tmp" "$url"; then
         err "Failed to download $asset"
         exit 1
     fi
