@@ -50,8 +50,8 @@ Everything lives in this repo. No external toolchains beyond stock `apt`. Each i
 | 4 | **MTProto Proxy** ([`tools/mtproto.sh`](tools/mtproto.sh)) | Telegram proxy; anti-censorship | ShellCheck strict; binary pinned, SHA-256 verified |
 | 5 | **Cloudflare WARP** ([`tools/warp.sh`](tools/warp.sh)) | Commercial-grade zero-trust tunnel | ShellCheck strict; Cloudflare official repo |
 | 6 | **PPTP** ([`tools/pptp.sh`](tools/pptp.sh)) | Legacy MS-CHAPv2 + MPPE (use only if required) | ShellCheck strict + dry-run structural checks; refuses on Ubuntu 24.04+ |
-| 7 | **L2TP/IPsec** ([`tools/l2tp.sh`](tools/l2tp.sh)) | Classic road-warrior IPSec tunnel | ShellCheck strict + real strongSwan starter + real xl2tpd startup |
-| 8 | **GRE** ([`tools/gre.sh`](tools/gre.sh)) | Plaintext layer-3 P2P tunnel between trusted nodes | ShellCheck strict + netns ping + multiple-tunnel collision checks |
+| 7 | **L2TP/IPsec** ([`tools/l2tp.sh`](tools/l2tp.sh)) | Classic road-warrior IPSec tunnel | ShellCheck strict + real strongSwan `starter --nofork` (fails if starter is missing) + real xl2tpd startup |
+| 8 | **GRE** ([`tools/gre.sh`](tools/gre.sh)) | Plaintext layer-3 P2P tunnel between trusted nodes | ShellCheck strict + dry-run mirroring + multiple-tunnel collision checks + ufw add/remove via the tool's functions; netns ping only where the runner kernel has `ip_gre` (currently skipped, see CI) |
 
 > ⚠️ **GRE traffic is unencrypted.** Use it only inside trusted networks (same datacenter, VPN backbone, etc.). For untrusted underlays, wrap the link in IPsec or switch to WireGuard/OpenVPN.
 
@@ -125,7 +125,21 @@ Uses `pptpd` (MS-CHAPv2 + 128-bit MPPE). Exits early on Ubuntu 24.04+ where the 
 
 #### L2TP/IPsec (menu 7)
 
-Generates `ipsec.conf` / `ipsec.secrets` (strongSwan) and `xl2tpd.conf` / `options.xl2tpd` from scratch. CI feeds those exact files to `/usr/lib/ipsec/starter --nofork` and `xl2tpd -D`; any unknown keyword fails the build.
+Generates `ipsec.conf` / `ipsec.secrets` (strongSwan, classic stroke format) and `xl2tpd.conf` / `options.xl2tpd` from scratch. CI feeds those exact files to strongSwan's `starter --nofork` and `xl2tpd -D`; any unknown keyword or parse error fails the build, and a missing `starter` binary fails the build too.
+
+The classic `ipsec.conf` is only read by `starter` from the **`strongswan-starter`** package, so the tool installs `strongswan-starter strongswan-charon xl2tpd ppp` explicitly and checks each with `apt-cache show` first; if one is missing it stops before changing anything. The `strongswan` metapackage is not enough on newer releases: there it resolves to `charon-systemd` + `strongswan-swanctl` and installs no starter.
+
+**Supported OS for `l2tp.sh`** (checked against the official `Packages` indexes, amd64, November 2026):
+
+| Release | `strongswan-starter` | Component | `strongswan` metapackage pulls in starter? | `l2tp.sh` |
+|---------|----------------------|-----------|---------------------------------------------|-----------|
+| Ubuntu 22.04 (jammy) | 5.9.5-2ubuntu2.8 | main | Yes (`Depends: strongswan-charon, strongswan-starter`) | Supported |
+| Ubuntu 24.04 (noble) | 5.9.13-2ubuntu4.24.04.5 | main | Yes (`Depends: strongswan-charon, strongswan-starter`) | Supported |
+| Ubuntu 26.04 (resolute, newest LTS) | 6.0.4-1ubuntu3.2 | **universe** | No (`charon-systemd \| strongswan-charon, strongswan-swanctl \| strongswan-starter`) | Supported with `universe` on (default on stock images); explicit install required |
+| Debian 12 (bookworm) | 5.9.8-5+deb12u5 | main | Yes (`strongswan-charon`, `strongswan-starter`) | Supported |
+| Debian 13 (trixie) | 6.0.1-6+deb13u7 | main | No (alternatives incl. `charon-systemd`, `strongswan-swanctl`) | Supported; explicit install required |
+
+strongSwan documents the stroke/`starter` interface as legacy. Moving to `swanctl.conf` is a TODO in the script header.
 
 - **Firewall**: expose **UDP 500** and **UDP 4500** only. UDP 1701 is **not** opened publicly — L2TP rides inside the IPsec tunnel.
 - **Windows behind NAT**: some builds require `EnableTransportModeDirectAccess` (DWORD = 1) in `HKLM\SYSTEM\CurrentControlSet\Services\PolicyAgent\`. Without it, Phase 1 may fail or the tunnel may drop. See Microsoft's IKE transport-mode docs.
@@ -181,11 +195,11 @@ GitHub Actions validates every push / PR touching `.sh` or `.yml`:
 | `shellcheck` | Strict ShellCheck on all our scripts; error-only on `wireguard-install.sh` |
 | `config-test` | `ocserv --test-config` against the generated config |
 | `pptp-dryrun` | Structural greps on `pptp.sh print-config` output; apt-cache guard for 24.04+ |
-| `l2tp-validate` | Feeds the generated strongSwan + xl2tpd configs to the real daemons (`starter --nofork`, `xl2tpd -D`) |
+| `l2tp-validate` | Prints `/etc/os-release` + `apt-cache policy` for the strongSwan packages, installs `strongswan-starter` explicitly, feeds the generated configs to `starter --nofork` and `xl2tpd -D`; fails on parser errors or a missing starter binary (no fallback) |
 | `gre-dryrun` | Mirrored-inner-address assertion + outer-endpoint swap + MTU consistency |
-| `gre-functional` | End-to-end netns ping test (skipped gracefully when `ip_gre` is unavailable) |
+| `gre-functional` | End-to-end netns ping test. **Skipped** when the runner kernel cannot load `ip_gre` (the case on the current `ubuntu-latest` Azure kernel). A skip is reported as a `::warning::` and in the job summary, and is not a pass |
 | `gre-multiple` | Two independent tunnel pairs pick disjoint `/30` subnets (collision avoidance) |
-| `gre-ufw` | Inserts a dummy ufw rule, then asserts both `remove` and `uninstall` purge it from active and recorded state |
+| `gre-ufw` | Adds the rule with the tool's `allow_gre_firewall`, removes it with the tool's `remove_gre_firewall` (the same function `remove` and `uninstall` use), and checks `ufw show added` after each step |
 
 Only `actions/checkout@v4` is used as a third-party action; all other steps are plain `run` commands.
 

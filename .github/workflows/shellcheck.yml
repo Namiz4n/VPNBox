@@ -99,10 +99,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Install strongSwan + xl2tpd + ppp
+      - name: Report OS + strongSwan package policy
         run: |
+          echo "=== /etc/os-release ==="
+          cat /etc/os-release
           sudo apt-get update
-          sudo apt-get install -y strongswan xl2tpd ppp
+          echo "=== apt-cache policy ==="
+          apt-cache policy strongswan-starter strongswan-swanctl charon-systemd
+
+      - name: Install strongswan-starter (explicit) + xl2tpd + ppp
+        run: |
+          set -eo pipefail
+          # Same package set as tools/l2tp.sh (L2TP_PACKAGES). Do NOT rely on
+          # the `strongswan` metapackage: on Ubuntu 26.04 it resolves to
+          # charon-systemd + swanctl and installs no starter.
+          sudo apt-get install -y strongswan-starter strongswan-charon xl2tpd ppp
+          echo "=== installed strongSwan packages ==="
+          dpkg -l 'strongswan*' 'charon*' | awk '/^ii/{print $2, $3}'
+          echo "=== strongswan-starter file list (binaries) ==="
+          dpkg -L strongswan-starter | grep -E '/(starter|ipsec)$' || true
 
       - name: Generate and validate L2TP configs
         run: |
@@ -133,56 +148,57 @@ jobs:
           sudo ip xfrm state flush 2>/dev/null || true
           sudo ip xfrm policy flush 2>/dev/null || true
 
-          # Modern Ubuntu strongSwan packages drop the `starter` binary in various
-          # locations (or remove it entirely when charon-systemd is the primary
-          # launcher). Probe common paths; fall back to `ipsec statusall` if none
-          # is found.
-          STAGER_PATH=""
-          for _cand in /usr/lib/ipsec/starter /usr/sbin/starter \
-                       /usr/libexec/ipsec/starter /usr/lib/strongswan/starter \
+          # Locate the starter binary shipped by strongswan-starter. There is
+          # NO fallback: without starter nothing parses ipsec.conf, so a
+          # missing binary is a hard failure, not a pass.
+          STARTER_PATH=""
+          for _cand in /usr/lib/ipsec/starter /usr/libexec/ipsec/starter \
+                       /usr/sbin/starter /usr/lib/strongswan/starter \
                        /usr/libexec/strongswan/starter; do
             if sudo test -x "$_cand"; then
-              STAGER_PATH="$_cand"
+              STARTER_PATH="$_cand"
               break
             fi
           done
-          if [[ -z "$STAGER_PATH" ]]; then
-            echo "[l2tp] no standalone starter binary found; falling back to ipsec statusall + parse-only check"
+          if [[ -z "$STARTER_PATH" ]]; then
+            STARTER_PATH="$(dpkg -L strongswan-starter 2>/dev/null | grep -E '/starter$' | head -n1 || true)"
           fi
+          if [[ -z "$STARTER_PATH" ]] || ! sudo test -x "$STARTER_PATH"; then
+            echo "::error::strongSwan starter binary not found after installing strongswan-starter; ipsec.conf cannot be validated."
+            dpkg -L strongswan-starter 2>&1 | head -40 || true
+            exit 1
+          fi
+          echo "[l2tp] using starter: $STARTER_PATH"
 
           echo "=== strongSwan starter output ==="
           rc=0
-          starter_out=""
-          if [[ -n "$STAGER_PATH" ]]; then
-            # Use timeout to prevent hanging on valid config; exit code 124 = healthy daemon.
-            # Exit code 127 = command not found (should not happen after the probe above).
-            # Any other non-zero exit is an environment issue, not a config bug.
-            starter_out="$(timeout 10 sudo "$STAGER_PATH" --nofork 2>&1)" || rc=$?
-            echo "$starter_out"
-            if [[ "$rc" -eq 124 ]]; then
-              echo "strongSwan starter ran for 10s without crashing (likely healthy)."
-            elif [[ "$rc" -eq 0 ]]; then
-              echo "strongSwan starter exited cleanly."
-            elif [[ "$rc" -ne 127 ]]; then
-              # rc != 127 means the binary was found but failed for a runtime reason
-              # (service already running, XFRM conflict, missing interface, ...).
-              # Treat as warning — only parse errors are config bugs.
-              echo "::warning::strongSwan starter returned exit $rc (runtime/environment issue, not a config bug)"
-            else
-              echo "::error::strongSwan starter binary disappeared between probe and execution"
-              exit 1
-            fi
+          # starter --nofork stays in the foreground: 124 (timeout) = it parsed
+          # the config and kept running. Other non-zero exits are runtime /
+          # environment issues (XFRM, netlink, already running) -> warning.
+          # Only parser messages decide config validity.
+          starter_out="$(timeout 10 sudo "$STARTER_PATH" --nofork 2>&1)" || rc=$?
+          echo "$starter_out"
+          echo "[l2tp] starter exit code: $rc"
+          if [[ "$rc" -eq 124 ]]; then
+            echo "strongSwan starter ran for 10s (config loaded, daemon kept running)."
+          elif [[ "$rc" -eq 0 ]]; then
+            echo "strongSwan starter exited cleanly."
+          elif [[ "$rc" -eq 126 || "$rc" -eq 127 ]]; then
+            echo "::error::strongSwan starter could not be executed (exit $rc)"
+            exit 1
           else
-            # No standalone binary: use `ipsec statusall` to exercise the parser at least.
-            starter_out="$(timeout 5 sudo ipsec statusall 2>&1 || true)"
-            echo "$starter_out"
+            echo "::warning::strongSwan starter returned exit $rc (runtime/environment issue, not a config bug)"
           fi
-          # Only parse errors are fatal; timeout (124) and XFRM/netlink environment errors are okay.
           if echo "$starter_out" | grep -iqE 'unknown keyword|parsing error|syntax error'; then
             echo "::error::strongSwan starter reported parsing errors"
             exit 1
           fi
-          echo "strongSwan starter: OK."
+          if ! echo "$starter_out" | grep -qiE 'loading config setup|loading conn'; then
+            echo "::warning::starter output has no 'loading config setup'/'loading conn' lines; check the log above."
+          fi
+          sudo pkill -f "$STARTER_PATH" 2>/dev/null || true
+          sudo pkill charon 2>/dev/null || true
+          echo "strongSwan starter: no parser errors in ipsec.conf."
 
           echo "=== xl2tpd startup check ==="
           sudo rm -f /var/run/xl2tpd/l2tp-control
@@ -282,22 +298,31 @@ jobs:
       - name: Check ip_gre availability
         id: gre-check
         run: |
-          if modprobe ip_gre 2>/dev/null; then
+          # modprobe needs root: without sudo it fails for every user even
+          # when the module exists, which would turn every run into a skip.
+          echo "kernel: $(uname -r)"
+          if sudo modprobe ip_gre 2>&1; then
             echo "ip_gre loaded (built-in or module present)."
+            lsmod | grep -E '^ip_gre' || echo "(ip_gre not in lsmod: built-in)"
             echo "can_test=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "ip_gre not currently loadable; installing linux-modules-extra ..."
           sudo apt-get update
-          sudo apt-get install -y linux-modules-extra-$(uname -r) || true
-          if modprobe ip_gre 2>/dev/null; then
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          if sudo modprobe ip_gre 2>&1; then
             echo "ip_gre loaded after installing linux-modules-extra."
             echo "can_test=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "::warning::ip_gre cannot be loaded even after installing linux-modules-extra."
-          echo "Skipping the functional netns test; the dry-run job validates address mirroring."
+          echo "::warning title=GRE functional test SKIPPED::ip_gre cannot be loaded on this runner (kernel $(uname -r)); the netns + ping test did NOT run."
           echo "can_test=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### GRE functional test: SKIPPED"
+            echo ""
+            echo "ip_gre could not be loaded on kernel \`$(uname -r)\` (no matching linux-modules-extra package)."
+            echo "The netns + ping test did **not** run; a green job here does not mean GRE was tested end-to-end."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build a GRE tunnel across two netns and ping
         if: steps.gre-check.outputs.can_test == 'true'
@@ -372,6 +397,7 @@ jobs:
           sudo ip netns del gre-test-a 2>/dev/null || true
           sudo ip netns del gre-test-b 2>/dev/null || true
           echo "GRE functional test PASSED."
+          echo "### GRE functional test: RAN and PASSED (ping A<->B over gre0)" >> "$GITHUB_STEP_SUMMARY"
           rm -rf "$SIDES_DIR"
 
   gre-multiple:
@@ -433,7 +459,7 @@ jobs:
           rm -rf "$D1" "$D2"
 
   gre-ufw:
-    name: GRE ufw rule add/remove (via tool, not hand-written rules)
+    name: GRE ufw rule add/remove (allow_gre_firewall + remove_gre_firewall)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -456,7 +482,7 @@ jobs:
           sudo ufw status verbose | head -5
           echo "ufw bootstrapped OK."
 
-      - name: Exercise gre.sh allow_gre_firewall + ufw delete (direct, one sudo pass)
+      - name: Exercise gre.sh allow_gre_firewall + remove_gre_firewall (one sudo pass)
         run: |
           set -eo pipefail
           REMOTE="203.0.113.9"
@@ -486,9 +512,11 @@ jobs:
               exit 1
             fi
             echo "[test] add verified: proto gre rule present"
-            # --- Remove: fire the same ufw-delete path remove_tunnel takes ---
-            ufw delete allow in proto gre from "$REMOTE_IP" 2>&1 || true
-            echo "[test] remove done"
+            # --- Remove: the tool's own removal function (shared by
+            # remove_tunnel and uninstall). No `|| true`: under set -e a
+            # failing removal fails the job.
+            remove_gre_firewall "$REMOTE_IP"
+            echo "[test] remove_gre_firewall done"
             ufw_after="$(sudo ufw status verbose 2>/dev/null || true)"
             added_after="$(sudo ufw show added 2>/dev/null || true)"
             echo "--- ufw status verbose after remove ---"

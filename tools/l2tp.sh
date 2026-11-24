@@ -7,16 +7,27 @@
 # forwarding + NAT + MSS clamp, and keeps the services enabled at boot.
 #
 # CONFIG STYLE (documented choice):
-#   The Debian/Ubuntu strongswan packages ship the CLASSIC stroke config
-#   format by default: /etc/ipsec.conf + /etc/ipsec.secrets, driven by the
-#   `strongswan-starter` service (unit: strongswan-starter.service).
-#   The swanctl format (/etc/strongswan/swanctl.conf, driven by
-#   charon with --use-swanctl) is a separate opt-in package
-#   (strongswan-swanctl) and is NOT the distro default on any supported
-#   release (verified against the noble/bookworm/jammy .deb contents).
-#   This tool therefore writes ipsec.conf + ipsec.secrets. If you later
-#   install strongswan-swanctl and switch charon to swanctl mode, you
-#   will need to convert these files; this tool does not manage swanctl.
+#   This tool writes the CLASSIC stroke config: /etc/ipsec.conf +
+#   /etc/ipsec.secrets, read by `starter` from the strongswan-starter
+#   package (unit: strongswan-starter.service). That package is therefore
+#   installed EXPLICITLY, never via the `strongswan` metapackage alone:
+#     * Ubuntu 22.04/24.04, Debian 12: `strongswan` Depends on
+#       strongswan-starter (main), so the old behaviour happened to work.
+#     * Ubuntu 26.04, Debian 13: `strongswan` Depends on
+#       "charon-systemd | strongswan-charon, strongswan-swanctl |
+#       strongswan-starter", so apt picks charon-systemd + swanctl and NO
+#       starter binary or ipsec.conf parser is installed. On Ubuntu 26.04
+#       strongswan-starter is in `universe`.
+#   Availability is checked with `apt-cache show` before installing; if
+#   the package is missing the install stops with a clear message. (Package
+#   index results per release are documented in README.md.)
+#
+# TODO (future): swanctl mode. strongSwan documents the stroke/starter
+#   interface (ipsec.conf, `ipsec` command) as legacy; the current
+#   interface is vici/swanctl (/etc/swanctl/swanctl.conf, charon-systemd).
+#   Add a mode that renders swanctl.conf (connections + secrets for the
+#   IKEv1 PSK transport-mode L2TP case) and validates it with
+#   `swanctl --load-all`, then make it the default once tested.
 #
 # IKE VERSION (documented choice):
 #   L2TP-over-IPsec road-warrior from Windows/Android clients is the
@@ -656,8 +667,9 @@ do_install() {
     done
     trap rollback EXIT
 
-    log "Installing strongswan + xl2tpd + ppp..."
-    apt_get install strongswan xl2tpd ppp || die "Package install failed."
+    log "Installing strongswan-starter + strongswan-charon + xl2tpd + ppp..."
+    ensure_l2tp_packages_available
+    apt_get install "${L2TP_PACKAGES[@]}" || die "Package install failed."
 
     log "Writing config..."
     mkdir -p /etc/ppp /etc/xl2tpd /etc/sysctl.d /etc/modules-load.d
@@ -743,7 +755,7 @@ uninstall() {
     esac
     systemctl disable --now "$SERVICE_IPSEC" "$SERVICE_XL2TPD" 2>/dev/null || true
     rm -f "$SYSCTL" "$MODULES"
-    apt_get remove strongswan xl2tpd ppp || true
+    apt_get remove "${L2TP_PACKAGES[@]}" strongswan || true
     log "L2TP/IPsec removed (chap-secrets kept; delete $CHAP_SECRETS manually if unwanted)."
 }
 
@@ -887,5 +899,37 @@ apt_get() {
 
 # BACKUP_DIR is set lazily so print-config (no writes) never creates it.
 BACKUP_DIR="/var/lib/l2tpd-backup"
+
+# Packages installed by do_install. strongswan-starter is listed EXPLICITLY
+# (it provides `starter`, the `ipsec` command and the ipsec.conf parser);
+# the `strongswan` metapackage no longer pulls it in on Ubuntu 26.04 /
+# Debian 13 (see header). strongswan-charon is the charon daemon that
+# starter launches (charon-systemd is the swanctl-only variant).
+L2TP_PACKAGES=(strongswan-starter strongswan-charon xl2tpd ppp)
+
+ensure_l2tp_packages_available() {
+    # Verify every package exists in the configured apt sources BEFORE
+    # touching anything, so an unsupported release stops here with a clear
+    # message instead of failing later at service start.
+    command -v apt-cache >/dev/null 2>&1 \
+        || die "apt-cache not found; this tool supports Debian/Ubuntu only."
+    apt-get update >/dev/null 2>&1 || warn "apt-get update failed; using cached package lists."
+    local p missing=()
+    for p in "${L2TP_PACKAGES[@]}"; do
+        if ! apt-cache show "$p" >/dev/null 2>&1; then
+            missing+=("$p")
+        fi
+    done
+    if [[ "${#missing[@]}" -gt 0 ]]; then
+        err "Required package(s) not available on ${DISTRO_ID:-this system} ${RELEASE:-} (${DISTRO_CODENAME:-}): ${missing[*]}"
+        if [[ " ${missing[*]} " == *" strongswan-starter "* ]]; then
+            err "This tool writes the classic /etc/ipsec.conf, which only strongswan-starter can load."
+            if [[ "${DISTRO_ID:-}" == "ubuntu" ]]; then
+                err "On Ubuntu 26.04+ strongswan-starter is in 'universe': run 'add-apt-repository universe && apt-get update' and retry."
+            fi
+        fi
+        die "Stopping before any change. See README (L2TP/IPsec supported OS table)."
+    fi
+}
 
 main

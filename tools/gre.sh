@@ -484,6 +484,77 @@ allow_gre_firewall() {
     esac
 }
 
+# remove_gre_firewall <remote_ip> [nat]
+#   Single source of truth for undoing allow_gre_firewall (and, with "nat",
+#   setup_forwarding). Used by remove_tunnel, uninstall and the CI test.
+#   * <remote_ip> non-empty: delete the GRE accept rule for that peer from
+#     the active frontend (ufw / firewalld / iptables).
+#   * 2nd arg "nat": also delete the FW_TAG-tagged MASQUERADE + MSS clamp
+#     rules. Those are always iptables (setup_forwarding writes them with
+#     iptables directly, whatever the frontend).
+#   Idempotent: a rule that is already absent is not an error.
+#   Returns non-zero if a rule could not be removed.
+remove_gre_firewall() {
+    local remote="${1:-}" with_nat="${2:-}" fw out rc rule iface
+    fw="$(detect_firewall)"
+    if [[ -n "$remote" ]]; then
+        case "$fw" in
+            ufw)
+                # Same rule text as allow_gre_firewall, so ufw matches it
+                # exactly. --force: never prompt.
+                rc=0
+                out="$(ufw --force delete allow in proto gre from "$remote" 2>&1)" || rc=$?
+                if grep -q 'non-existent rule' <<<"$out"; then
+                    info "ufw: no GRE rule for $remote (already absent)."
+                elif [[ "$rc" -eq 0 ]]; then
+                    log "ufw: removed GRE rule for $remote."
+                else
+                    err "ufw: could not remove GRE rule for $remote (exit $rc): $out"
+                    return 1
+                fi
+                ;;
+            firewalld)
+                rule="rule protocol value=\"gre\" source address=\"$remote\" accept"
+                if firewall-cmd --permanent --query-rich-rule="$rule" >/dev/null 2>&1; then
+                    firewall-cmd --permanent --remove-rich-rule="$rule" >/dev/null \
+                        || { err "firewalld: could not remove GRE rule for $remote"; return 1; }
+                    firewall-cmd --reload >/dev/null \
+                        || { err "firewalld: reload failed after removing GRE rule"; return 1; }
+                    log "firewalld: removed GRE rule for $remote."
+                else
+                    info "firewalld: no GRE rule for $remote (already absent)."
+                fi
+                ;;
+            iptables)
+                while iptables -C INPUT -p gre -s "$remote" -j ACCEPT 2>/dev/null; do
+                    iptables -D INPUT -p gre -s "$remote" -j ACCEPT \
+                        || { err "iptables: could not remove GRE rule for $remote"; return 1; }
+                done
+                log "iptables: GRE rule for $remote absent."
+                ;;
+            none)
+                info "No active firewall; no GRE rule to remove for $remote."
+                ;;
+        esac
+    fi
+    if [[ "$with_nat" == "nat" ]] && command -v iptables >/dev/null 2>&1; then
+        iface="$(default_iface)"
+        while iptables -t nat -C POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE 2>/dev/null; do
+            iptables -t nat -D POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE \
+                || { err "iptables: could not remove NAT rule"; return 1; }
+        done
+        while iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do
+            iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu \
+                || { err "iptables: could not remove MSS clamp rule"; return 1; }
+        done
+    fi
+    if [[ "$fw" == "iptables" || "$with_nat" == "nat" ]]; then
+        # Persisting is best-effort: iptables-persistent may not be installed.
+        netfilter-persistent save >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
 setup_forwarding() {
     local iface
     iface="$(default_iface)"
@@ -522,32 +593,18 @@ remove_tunnel() {
     rm -f "${UNIT_DIR}/gre-${name}.service"
     # Remove our config.
     rm -f "$CONF_DIR/${name}.conf"
-    # Firewall cleanup: remove the rule(s) we added, tagged with our FW_TAG.
-    local fw
-    fw="$(detect_firewall)"
-    case "$fw" in
-        ufw)
-            # Match the same command shape used when adding the rule so
-            # `ufw delete` finds it without ambiguity about which rule to
-            # remove (u32 vs explicit-protocol).
-            ufw delete allow in proto gre from "${saved_remote}" 2>&1 \
-                || true
-            ;;
-        firewalld)
-            firewall-cmd --permanent --remove-rich-rule="rule protocol value=\"gre\" source address=\"${saved_remote}\" accept" 2>&1 || true
-            firewall-cmd --reload 2>&1 || true
-            ;;
-        iptables)
-            iptables -D INPUT -p gre -s "${saved_remote}" -j ACCEPT 2>&1 \
-                || true
-            # Also clean the NAT/MSS rules if forwarding was enabled.
-            local iface
-            iface="$(default_iface)"
-            iptables -t nat -D POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE 2>/dev/null || true
-            iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-            netfilter-persistent save >/dev/null 2>&1 || true
-            ;;
-    esac
+    # Firewall cleanup via the shared helper (also used by uninstall + CI).
+    # The NAT/MSS rules are shared by all tunnels, so drop them only when
+    # this was the last configured tunnel.
+    local nat_arg=""
+    if ! compgen -G "$CONF_DIR/*.conf" >/dev/null; then
+        nat_arg="nat"
+    fi
+    if [[ -z "$saved_remote" ]]; then
+        warn "No saved config for '$name': remote IP unknown, so its GRE firewall rule (if any) is left in place."
+    fi
+    remove_gre_firewall "$saved_remote" "$nat_arg" \
+        || die "Firewall cleanup for '$name' failed (see above)."
     systemctl daemon-reload 2>/dev/null || true
     log "GRE tunnel '$name' removed."
 }
@@ -670,34 +727,10 @@ uninstall() {
     rm -rf "$CONF_DIR"
     systemctl daemon-reload 2>/dev/null || true
     rm -f "$MODULES" "$SYSCTL"
-    # Clean up the NAT/MSS rules we added (regardless of whether any
-    # tunnels remained).
-    local fw iface
-    fw="$(detect_firewall)"
-    iface="$(default_iface)"
-    case "$fw" in
-        ufw)
-            # Delete by the same canonical form we insert with. We iterate
-            # once per tunnel because each tunnel gets its own rule. A
-            # missing rule is fine — idempotent removal.
-            ufw delete allow in proto gre from "$REMOTE_IP" 2>&1 \
-                || true
-            ;;
-        firewalld)
-            # Remove any rich rule matching our peer's remote IP.
-            firewall-cmd --permanent \
-                --remove-rich-rule="rule protocol value=\"gre\" source address=\"$REMOTE_IP\" accept" \
-                2>&1 || true
-            firewall-cmd --reload 2>&1 || true
-            ;;
-        iptables)
-            iptables -D INPUT -p gre -s "$REMOTE_IP" -j ACCEPT 2>&1 \
-                || true
-            iptables -t nat -D POSTROUTING -o "$iface" -m comment --comment "$FW_TAG" -j MASQUERADE 2>/dev/null || true
-            iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,SYNACK SYN -m comment --comment "$FW_TAG" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-            netfilter-persistent save >/dev/null 2>&1 || true
-            ;;
-    esac
+    # Per-tunnel GRE rules were removed by remove_tunnel above (same
+    # helper). Drop the shared NAT/MSS rules unconditionally, so a host with
+    # no tunnel configs left (or only stray links) is also cleaned.
+    remove_gre_firewall "" nat || die "Firewall cleanup failed (see above)."
     log "All GRE tunnels removed and persistence files deleted."
 }
 
