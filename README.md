@@ -129,15 +129,15 @@ Generates `ipsec.conf` / `ipsec.secrets` (strongSwan, classic stroke format) and
 
 The classic `ipsec.conf` is only read by `starter` from the **`strongswan-starter`** package, so the tool installs `strongswan-starter strongswan-charon xl2tpd ppp` explicitly and checks each with `apt-cache show` first; if one is missing it stops before changing anything. The `strongswan` metapackage is not enough on newer releases: there it resolves to `charon-systemd` + `strongswan-swanctl` and installs no starter.
 
-**Supported OS for `l2tp.sh`** — every row is **unverified** until the `l2tp-os-matrix` CI job (official Docker image per release: `apt-get update`, `apt-cache policy`, `apt-cache depends strongswan`, explicit install, real `starter` + `xl2tpd` validation) has passed for it:
+**Supported OS for `l2tp.sh`** — verified by the `l2tp-os-matrix` CI job (official Docker image per release: `apt-get update`, `apt-cache policy`, `apt-cache depends strongswan`, explicit install, `l2tp.sh preflight`, real `starter` + `xl2tpd` validation), run [45451529139](https://github.com/Namiz4n/VPNBox/actions/runs/45451529139), 24 Nov 2026 (amd64). Versions are the candidates on that date and will drift with point updates:
 
 | Release | `strongswan-starter` | Component | `strongswan` metapackage pulls in starter? | `l2tp.sh` | Verified |
 |---------|----------------------|-----------|---------------------------------------------|-----------|----------|
-| Ubuntu 22.04 (jammy) | 5.9.5-2ubuntu2.8 | main | Yes | Supported | unverified |
-| Ubuntu 24.04 (noble) | 5.9.13-2ubuntu4.24.04.5 | main | Yes | Supported | unverified |
-| Ubuntu 26.04 (resolute) | 6.0.4-1ubuntu3.2 | **universe** | No (`strongswan-swanctl \| strongswan-starter`) | Supported with `universe` enabled; `l2tp.sh` installs starter explicitly and refuses with an explanation when `universe` is off | unverified |
-| Debian 12 (bookworm) | 5.9.8-5+deb12u5 | main | unverified | unverified | unverified |
-| Debian 13 (trixie) | 6.0.1-6+deb13u7 | main | unverified | unverified | unverified |
+| Ubuntu 22.04 (jammy) | 5.9.5-2ubuntu2.8 | main | Yes (`strongswan-charon, strongswan-starter`) | Supported | CI pass |
+| Ubuntu 24.04 (noble) | 5.9.13-2ubuntu4.24.04.5 | main | Yes (`strongswan-charon, strongswan-starter`) | Supported | CI pass |
+| Ubuntu 26.04 (resolute) | 6.0.4-1ubuntu3.2 | **universe** | No (`charon-systemd \| strongswan-charon, strongswan-swanctl \| strongswan-starter`) | Supported with `universe` enabled (default on stock images); `l2tp.sh` installs starter explicitly and refuses with an explanation when `universe` is off | CI pass (incl. universe-off refusal) |
+| Debian 12 (bookworm) | 5.9.8-5+deb12u6 | main | Yes (`strongswan-charon, strongswan-starter`) | Supported | CI pass |
+| Debian 13 (trixie) | 6.0.1-6+deb13u7 | main | No (`charon-systemd \| strongswan-charon, strongswan-swanctl \| strongswan-starter`) | Supported; starter installed explicitly | CI pass |
 
 Run `sudo bash tools/l2tp.sh preflight` to check a server before installing: it changes nothing and exits non-zero with an explanation if `strongswan-starter`, `strongswan-charon`, `xl2tpd` or `ppp` cannot be installed (including a disabled Ubuntu `universe`).
 
