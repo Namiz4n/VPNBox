@@ -928,23 +928,32 @@ ensure_l2tp_packages_available() {
         || die "apt-cache not found; this tool supports Debian/Ubuntu only."
     apt-get update >/dev/null 2>&1 || warn "apt-get update failed; using cached package lists."
     local p missing=()
+    # Use the policy Candidate, not `apt-cache show`: for a name that is only
+    # referenced by another package's Depends (e.g. strongswan-starter once
+    # universe is off on 26.04) `apt-cache show` prints "purely virtual" /
+    # "No packages found" but still exits 0, which hid the missing package.
+    local cand
     for p in "${L2TP_PACKAGES[@]}"; do
-        if ! apt-cache show "$p" >/dev/null 2>&1; then
+        cand="$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/ {print $2; exit}' || true)"
+        if [[ -z "$cand" || "$cand" == "(none)" ]]; then
             missing+=("$p")
         fi
     done
     if [[ "${#missing[@]}" -gt 0 ]]; then
         err "Required package(s) not available on ${DISTRO_ID:-this system} ${RELEASE:-} (${DISTRO_CODENAME:-}): ${missing[*]}"
-        if [[ " ${missing[*]} " == *" strongswan-starter "* ]]; then
+        if [[ "${DISTRO_ID:-}" == "ubuntu" ]] && ! ubuntu_universe_enabled; then
+            # On Ubuntu, xl2tpd (all releases) and strongswan-starter (26.04)
+            # live in 'universe'; a disabled universe is the usual cause,
+            # whichever of them is reported missing.
+            err "The Ubuntu 'universe' component is NOT enabled in your apt sources."
+            err "xl2tpd (and on Ubuntu 26.04 also strongswan-starter) is only in 'universe'. Enable it and retry:"
+            err "    add-apt-repository universe && apt-get update"
+        elif [[ " ${missing[*]} " == *" strongswan-starter "* ]]; then
             err "This tool writes the classic /etc/ipsec.conf, which only strongswan-starter can load."
-            if [[ "${DISTRO_ID:-}" == "ubuntu" ]] && ! ubuntu_universe_enabled; then
-                err "The Ubuntu 'universe' component is NOT enabled in your apt sources."
-                err "On Ubuntu 26.04 strongswan-starter is only in 'universe'. Enable it and retry:"
-                err "    add-apt-repository universe && apt-get update"
-            else
-                err "strongswan-starter is not offered by any enabled apt source on this release,"
-                err "so this release is not supported by l2tp.sh (see the README support table)."
-            fi
+            err "strongswan-starter is not offered by any enabled apt source on this release,"
+            err "so this release is not supported by l2tp.sh (see the README support table)."
+        else
+            err "Check your apt sources; this release may not be supported by l2tp.sh (see the README support table)."
         fi
         die "Stopping before any change. See README (L2TP/IPsec supported OS table)."
     fi
