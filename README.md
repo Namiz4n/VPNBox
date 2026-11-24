@@ -51,7 +51,7 @@ Everything lives in this repo. No external toolchains beyond stock `apt`. Each i
 | 5 | **Cloudflare WARP** ([`tools/warp.sh`](tools/warp.sh)) | Commercial-grade zero-trust tunnel | ShellCheck strict; Cloudflare official repo |
 | 6 | **PPTP** ([`tools/pptp.sh`](tools/pptp.sh)) | Legacy MS-CHAPv2 + MPPE (use only if required) | ShellCheck strict + dry-run structural checks; refuses on Ubuntu 24.04+ |
 | 7 | **L2TP/IPsec** ([`tools/l2tp.sh`](tools/l2tp.sh)) | Classic road-warrior IPSec tunnel | ShellCheck strict + real strongSwan `starter --nofork` (fails if starter is missing) + real xl2tpd startup |
-| 8 | **GRE** ([`tools/gre.sh`](tools/gre.sh)) | Plaintext layer-3 P2P tunnel between trusted nodes | ShellCheck strict + dry-run mirroring + multiple-tunnel collision checks + ufw add/remove via the tool's functions; netns ping only where the runner kernel has `ip_gre` (currently skipped, see CI) |
+| 8 | **GRE** ([`tools/gre.sh`](tools/gre.sh)) | Plaintext layer-3 P2P tunnel between trusted nodes | ShellCheck strict + dry-run mirroring + multiple-tunnel collision checks + ufw add/remove via the tool's functions + netns ping over a real GRE link (skipped with a visible warning if the runner kernel lacks `ip_gre`) |
 
 > ⚠️ **GRE traffic is unencrypted.** Use it only inside trusted networks (same datacenter, VPN backbone, etc.). For untrusted underlays, wrap the link in IPsec or switch to WireGuard/OpenVPN.
 
@@ -197,7 +197,7 @@ GitHub Actions validates every push / PR touching `.sh` or `.yml`:
 | `pptp-dryrun` | Structural greps on `pptp.sh print-config` output; apt-cache guard for 24.04+ |
 | `l2tp-validate` | Prints `/etc/os-release` + `apt-cache policy` for the strongSwan packages, installs `strongswan-starter` explicitly, feeds the generated configs to `starter --nofork` and `xl2tpd -D`; fails on parser errors or a missing starter binary (no fallback) |
 | `gre-dryrun` | Mirrored-inner-address assertion + outer-endpoint swap + MTU consistency |
-| `gre-functional` | End-to-end netns ping test. **Skipped** when the runner kernel cannot load `ip_gre` (the case on the current `ubuntu-latest` Azure kernel). A skip is reported as a `::warning::` and in the job summary, and is not a pass |
+| `gre-functional` | End-to-end netns test: runs the `ip` commands from `print-config` in two namespaces (fails if any is rejected) and pings over `gre1` in both directions. Skipped only if the runner kernel cannot load `ip_gre`; a skip shows up as a `::warning::` and in the job summary, and does not count as a pass |
 | `gre-multiple` | Two independent tunnel pairs pick disjoint `/30` subnets (collision avoidance) |
 | `gre-ufw` | Adds the rule with the tool's `allow_gre_firewall`, removes it with the tool's `remove_gre_firewall` (the same function `remove` and `uninstall` use), and checks `ufw show added` after each step |
 

@@ -27,7 +27,8 @@
 #       print-config | uninstall
 #     Non-interactive flags/env vars:
 #       --auto                       accept every default, no prompts
-#       --name <n>                   tunnel name (default gre0 / greN)
+#       --name <n>                   tunnel name (default gre1 / greN; gre0 is
+#                                    reserved by the kernel and rejected)
 #       --local <ip>                 local public IP (auto-detected default)
 #       --remote <ip>                remote public IP (required, validated)
 #       --inner-subnet <cidr>        /30 inner pair parent, default
@@ -207,7 +208,9 @@ ask_yes_no() {
 # peer-command generator can re-derive the exact commands.
 
 next_name() {
-    local n=0 base="gre"
+    # Start at gre1: gre0 is the kernel's fallback device, auto-created in
+    # every netns as soon as ip_gre is loaded; `ip link add gre0` fails.
+    local n=1 base="gre"
     while [[ -e "$CONF_DIR/${base}${n}.conf" ]] || ip link show "${base}${n}" >/dev/null 2>&1; do
         n=$((n + 1))
     done
@@ -295,7 +298,7 @@ compute_inner_pair() {
     fi
     # Mark currently-up links.
     local link
-    for link in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | grep -E '^gre' || true); do
+    for link in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | cut -d@ -f1 | grep -E '^gre' | grep -vxE 'gre0|gretap0|erspan0' || true); do
         local addr
         addr="$(ip -4 addr show "$link" 2>/dev/null | awk '/inet /{print $2}' | head -n1 || true)"
         [[ -n "$addr" ]] && used["${addr%/*}"]=1
@@ -350,8 +353,11 @@ ip_link_add_cmd() {
     if [[ -n "$GRE_TTL" ]]; then
         ttlarg=" ttl ${GRE_TTL}"
     fi
-    printf 'ip link add %s type gre local %s remote %s%s%s mtu %s\n' \
-        "$NAME" "$LOCAL_IP" "$REMOTE_IP" "$keyarg" "$ttlarg" "$TUNNEL_MTU"
+    # Link-level options (mtu) must come BEFORE `type gre`: everything after
+    # `type` goes to the gre option parser, which rejects `mtu` and prints
+    # its usage text (seen in CI once the netns test really ran).
+    printf 'ip link add %s mtu %s type gre local %s remote %s%s%s\n' \
+        "$NAME" "$TUNNEL_MTU" "$LOCAL_IP" "$REMOTE_IP" "$keyarg" "$ttlarg"
 }
 
 ip_addr_cmd() {
@@ -621,7 +627,7 @@ list_tunnels() {
         done
     fi
     local live
-    for live in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | grep -E '^gre'); do
+    for live in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | cut -d@ -f1 | grep -E '^gre' | grep -vxE 'gre0|gretap0|erspan0'); do
         echo "  $live  (live on this host)"
         shown=1
     done
@@ -635,7 +641,7 @@ status() {
     if [[ -n "$name" ]]; then
         load_tunnel_file "$name" 2>/dev/null || { warn "No config for '$name'"; return 0; }
     fi
-    for n in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | grep -E '^gre' || true); do
+    for n in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | cut -d@ -f1 | grep -E '^gre' | grep -vxE 'gre0|gretap0|erspan0' || true); do
         echo
         echo "Tunnel: $n"
         ip -s link show "$n" 2>/dev/null | sed 's/^/    /'
@@ -711,7 +717,7 @@ uninstall() {
         done
     fi
     local live
-    for live in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | grep -E '^gre'); do
+    for live in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' | cut -d@ -f1 | grep -E '^gre' | grep -vxE 'gre0|gretap0|erspan0'); do
         # Avoid duplicates.
         local seen=0
         local n
@@ -787,8 +793,12 @@ done
 
 # Validate inputs for any command that touches the network.
 validate_inputs() {
-    [[ -n "$NAME" ]] || NAME="${GRE_TUNNEL_NAME:-gre0}"
+    [[ -n "$NAME" ]] || NAME="${GRE_TUNNEL_NAME:-gre1}"
     [[ "$NAME" =~ ^[A-Za-z0-9_-]{1,15}$ ]] || die "Tunnel name must be 1..15 chars [A-Za-z0-9_-] (iproute2)."
+    case "$NAME" in
+        gre0|gretap0|erspan0)
+            die "'$NAME' is reserved by the kernel (ip_gre fallback device). Use another name, e.g. gre1." ;;
+    esac
     [[ -n "$LOCAL_IP" ]] || LOCAL_IP="${GRE_LOCAL_IP:-$(public_ip)}"
     validate_ipv4 "$LOCAL_IP" || die "Bad local IP."
     [[ -n "$REMOTE_IP" ]] || REMOTE_IP="${GRE_REMOTE_IP:-}"
@@ -847,7 +857,9 @@ main() {
             uninstall
             ;;
         default|"")
-            if ip link show gre0 >/dev/null 2>&1 || [[ -d "$CONF_DIR" ]]; then
+            # Not `ip link show gre0`: that is the kernel fallback device and
+            # exists whenever ip_gre is loaded, installed or not.
+            if compgen -G "$CONF_DIR/*.conf" >/dev/null; then
                 management_menu
             else
                 require_root
@@ -859,7 +871,9 @@ main() {
             ;;
         *)
             warn "Unknown subcommand '$cmd' (treated as no-args)."
-            if ip link show gre0 >/dev/null 2>&1 || [[ -d "$CONF_DIR" ]]; then
+            # Not `ip link show gre0`: that is the kernel fallback device and
+            # exists whenever ip_gre is loaded, installed or not.
+            if compgen -G "$CONF_DIR/*.conf" >/dev/null; then
                 management_menu
             else
                 require_root

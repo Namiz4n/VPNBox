@@ -225,7 +225,7 @@ jobs:
           set -uo pipefail
           SIDES_DIR="$(mktemp -d)"
           bash tools/gre.sh print-config \
-            --name gre0 \
+            --name gre1 \
             --local 203.0.113.1 \
             --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 \
@@ -233,7 +233,7 @@ jobs:
           # Side B uses the same generator with swapped outer endpoints;
           # this avoids eval'ing the peer `add` command which requires root.
           bash tools/gre.sh print-config \
-            --name gre0 \
+            --name gre1 \
             --local 203.0.113.2 \
             --remote 203.0.113.1 \
             --inner-subnet 10.10.0.0/24 \
@@ -280,9 +280,9 @@ jobs:
           [[ "$a_mtu" == "$b_mtu" ]] \
               || { echo "::error::MTU mismatch: A=$a_mtu B=$b_mtu"; exit 1; }
 
-          grep -q 'gre-gre0.service' "$SIDES_DIR/sideA.txt" \
+          grep -q 'gre-gre1.service' "$SIDES_DIR/sideA.txt" \
               || { echo "::error::systemd unit name missing from side A"; exit 1; }
-          grep -q 'gre-gre0.service' "$SIDES_DIR/sideB.txt" \
+          grep -q 'gre-gre1.service' "$SIDES_DIR/sideB.txt" \
               || { echo "::error::systemd unit name missing from side B"; exit 1; }
 
           echo "GRE dry-run PASSED: inner mirrors, outer swaps, MTU identical."
@@ -343,7 +343,7 @@ jobs:
 
           # Side A: generate via print-config, run the emitted ip commands.
           bash tools/gre.sh print-config \
-            --name gre0 \
+            --name gre1 \
             --local 203.0.113.1 \
             --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 \
@@ -351,11 +351,15 @@ jobs:
           echo "--- side A ---"
           cat "$SIDES_DIR/sideA.txt"
           side_a_cmds="$(grep -E '^ip (link|addr)' "$SIDES_DIR/sideA.txt")"
-          sudo ip netns exec gre-test-a bash -c "$side_a_cmds"
+          # set -e inside: a rejected `ip` command must fail the job, not be
+          # silently ignored (that is how the previous run hid a bad
+          # `ip link add` line and then pinged via the kernel's gre0).
+          sudo ip netns exec gre-test-a bash -ec "$side_a_cmds" \
+              || { echo "::error::side A ip commands failed"; exit 1; }
 
           # Side B: same generator with swapped outer endpoints.
           bash tools/gre.sh print-config \
-            --name gre0 \
+            --name gre1 \
             --local 203.0.113.2 \
             --remote 203.0.113.1 \
             --inner-subnet 10.10.0.0/24 \
@@ -363,12 +367,16 @@ jobs:
           echo "--- side B ---"
           cat "$SIDES_DIR/sideB.txt"
           side_b_cmds="$(grep -E '^ip (link|addr)' "$SIDES_DIR/sideB.txt")"
-          sudo ip netns exec gre-test-b bash -c "$side_b_cmds"
+          sudo ip netns exec gre-test-b bash -ec "$side_b_cmds" \
+              || { echo "::error::side B ip commands failed"; exit 1; }
+          echo "--- gre1 link details ---"
+          sudo ip netns exec gre-test-a ip -d link show gre1
+          sudo ip netns exec gre-test-b ip -d link show gre1
 
           # Verify symmetric inner addresses.
-          a_inner="$(sudo ip netns exec gre-test-a ip -4 addr show gre0 2>/dev/null \
+          a_inner="$(sudo ip netns exec gre-test-a ip -4 addr show gre1 2>/dev/null \
               | awk '/inet /{print $2}' | head -n1 || true)"
-          b_inner="$(sudo ip netns exec gre-test-b ip -4 addr show gre0 2>/dev/null \
+          b_inner="$(sudo ip netns exec gre-test-b ip -4 addr show gre1 2>/dev/null \
               | awk '/inet /{print $2}' | head -n1 || true)"
           echo "A inner: $a_inner"
           echo "B inner: $b_inner"
@@ -379,14 +387,14 @@ jobs:
 
           # Ping both directions.
           echo "--- ping A -> B ---"
-          if sudo ip netns exec gre-test-a ping -c 2 -W 2 "${b_inner%/*}" >/dev/null 2>&1; then
+          if sudo ip netns exec gre-test-a ping -c 2 -W 2 -I gre1 "${b_inner%/*}"; then
             echo "ping A->B: OK"
           else
             echo "::error::ping A->B failed"
             exit 1
           fi
           echo "--- ping B -> A ---"
-          if sudo ip netns exec gre-test-b ping -c 2 -W 2 "${a_inner%/*}" >/dev/null 2>&1; then
+          if sudo ip netns exec gre-test-b ping -c 2 -W 2 -I gre1 "${a_inner%/*}"; then
             echo "ping B->A: OK"
           else
             echo "::error::ping B->A failed"
@@ -397,7 +405,7 @@ jobs:
           sudo ip netns del gre-test-a 2>/dev/null || true
           sudo ip netns del gre-test-b 2>/dev/null || true
           echo "GRE functional test PASSED."
-          echo "### GRE functional test: RAN and PASSED (ping A<->B over gre0)" >> "$GITHUB_STEP_SUMMARY"
+          echo "### GRE functional test: RAN and PASSED (ping A<->B over gre1)" >> "$GITHUB_STEP_SUMMARY"
           rm -rf "$SIDES_DIR"
 
   gre-multiple:
@@ -416,15 +424,15 @@ jobs:
           TEMP_CONF="$(mktemp -d)"
           export GRE_CONF_DIR="$TEMP_CONF"
           bash tools/gre.sh print-config \
-            --name gre0 --local 203.0.113.1 --remote 203.0.113.2 \
+            --name gre1 --local 203.0.113.1 --remote 203.0.113.2 \
             --inner-subnet 10.10.0.0/24 > "$D1/a.txt"
           # Side B via print-config (not eval) to avoid root requirement
           bash tools/gre.sh print-config \
-            --name gre0 --local 203.0.113.2 --remote 203.0.113.1 \
+            --name gre1 --local 203.0.113.2 --remote 203.0.113.1 \
             --inner-subnet 10.10.0.0/24 > "$D1/b.txt"
-          # Simulate gre0 being installed: write its config so gre1 sees it.
+          # Simulate gre1 being installed: write its config so gre2 sees it.
           printf '%s\n' \
-            'NAME=gre0' \
+            'NAME=gre1' \
             'LOCAL_IP=203.0.113.1' \
             'REMOTE_IP=203.0.113.2' \
             'INNER_SUBNET=10.10.0.0/24' \
@@ -434,12 +442,12 @@ jobs:
             'GRE_TTL=' \
             'MTU=1476' \
             'FORWARDING=1' \
-            > "$TEMP_CONF/gre0.conf"
+            > "$TEMP_CONF/gre1.conf"
           bash tools/gre.sh print-config \
-            --name gre1 --local 203.0.114.1 --remote 203.0.114.2 \
+            --name gre2 --local 203.0.114.1 --remote 203.0.114.2 \
             --inner-subnet 10.10.0.0/24 > "$D2/a.txt"
           bash tools/gre.sh print-config \
-            --name gre1 --local 203.0.114.2 --remote 203.0.114.1 \
+            --name gre2 --local 203.0.114.2 --remote 203.0.114.1 \
             --inner-subnet 10.10.0.0/24 > "$D2/b.txt"
 
           inner1_a="$(grep '^ip addr add' "$D1/a.txt" | awk '{print $4}' | cut -d/ -f1)"
@@ -487,7 +495,7 @@ jobs:
           set -eo pipefail
           REMOTE="203.0.113.9"
           GWS="$GITHUB_WORKSPACE"
-          sudo ip link del gre0 2>/dev/null || true   # ensure clean slate
+          sudo ip link del gre1 2>/dev/null || true   # ensure clean slate
           # Write the test harness to a temp file on the runner so sudo bash can
           # source it cleanly without having to dodge bash -c quoting layers.
           cat > /tmp/_gre_ufw_test.sh <<'INNER'
