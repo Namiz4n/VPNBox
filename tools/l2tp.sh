@@ -18,7 +18,7 @@
 #       strongswan-starter", so apt picks charon-systemd + swanctl and NO
 #       starter binary or ipsec.conf parser is installed. On Ubuntu 26.04
 #       strongswan-starter is in `universe`.
-#   Availability is checked with `apt-cache show` before installing; if
+#   Availability is checked with `apt-cache policy` (install candidate) before installing; if
 #   the package is missing the install stops with a clear message. (Package
 #   index results per release are documented in README.md.)
 #
